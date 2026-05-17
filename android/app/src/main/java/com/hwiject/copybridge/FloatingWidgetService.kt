@@ -37,6 +37,8 @@ class FloatingWidgetService : Service() {
   private var initialTouchX = 0f
   private var initialTouchY = 0f
   private var widgetSize = WidgetSize.MEDIUM
+  private var copyMode = CopyMode.ALL
+  private var autoSendEnabled = false
 
   private enum class WidgetSize(
     val label: String,
@@ -255,7 +257,7 @@ class FloatingWidgetService : Service() {
     }
 
     val pasteButton = createWidgetButton("AI → TG 붙여넣기") {
-      CopyBridgeAccessibilityService.requestPasteAiToTelegram(this)
+      CopyBridgeAccessibilityService.requestPasteAiToTelegram(this, autoSendEnabled)
     }
 
         val copyModeButton = TextView(this).apply {
@@ -292,6 +294,39 @@ class FloatingWidgetService : Service() {
 
     panel.addView(
       copyModeButton,
+      LinearLayout.LayoutParams(size.contentWidth, 42).apply {
+        bottomMargin = 10
+      }
+    )
+
+    val autoSendButton = TextView(this).apply {
+      text = if (autoSendEnabled) "전송: 켬" else "전송: 끔"
+      setTextColor(Color.WHITE)
+      textSize = size.buttonTextSize
+      typeface = Typeface.DEFAULT_BOLD
+      gravity = Gravity.CENTER
+      background = roundedBackground(Color.parseColor("#333333"), 12f)
+      setOnClickListener {
+        autoSendEnabled = !autoSendEnabled
+        text = if (autoSendEnabled) "전송: 켬" else "전송: 끔"
+        Toast.makeText(
+          this@FloatingWidgetService,
+          if (autoSendEnabled) "자동 전송: 켬" else "자동 전송: 끔",
+          Toast.LENGTH_SHORT
+        ).show()
+      }
+      setOnTouchListener { view, event ->
+        when (event.action) {
+          MotionEvent.ACTION_DOWN -> view.alpha = 0.55f
+          MotionEvent.ACTION_UP,
+          MotionEvent.ACTION_CANCEL -> view.alpha = 1f
+        }
+        false
+      }
+    }
+
+    panel.addView(
+      autoSendButton,
       LinearLayout.LayoutParams(size.contentWidth, 42).apply {
         bottomMargin = 10
       }

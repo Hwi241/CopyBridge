@@ -72,7 +72,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     ).show()
   }
 
-  private fun handlePasteAiToTelegramRequest() {
+  private fun handlePasteAiToTelegramRequest(autoSend: Boolean) {
     val roots = getCandidateRoots()
 
     if (roots.isEmpty()) {
@@ -96,14 +96,32 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     if (clipboardText.isNotBlank()) {
       val setTextSuccess = setTextToNode(editableNode, clipboardText)
       if (setTextSuccess) {
-        Toast.makeText(this, "AI → TG 붙여넣기 완료 (SET_TEXT)", Toast.LENGTH_SHORT).show()
+        if (autoSend) {
+          val sent = clickSendButton(getCandidateRoots())
+          if (sent) {
+            Toast.makeText(this, "AI → TG 붙여넣기 완료 (SET_TEXT + 전송)", Toast.LENGTH_SHORT).show()
+          } else {
+            Toast.makeText(this, "붙여넣기는 완료, 전송 버튼은 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
+          }
+        } else {
+          Toast.makeText(this, "AI → TG 붙여넣기 완료 (SET_TEXT)", Toast.LENGTH_SHORT).show()
+        }
         return
       }
     }
 
     val pasteSuccess = pasteClipboardToNode(editableNode)
     if (pasteSuccess) {
-      Toast.makeText(this, "AI → TG 붙여넣기 완료 (ACTION_PASTE)", Toast.LENGTH_SHORT).show()
+      if (autoSend) {
+        val sent = clickSendButton(getCandidateRoots())
+        if (sent) {
+          Toast.makeText(this, "AI → TG 붙여넣기 완료 (ACTION_PASTE + 전송)", Toast.LENGTH_SHORT).show()
+        } else {
+          Toast.makeText(this, "붙여넣기는 완료, 전송 버튼은 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
+        }
+      } else {
+        Toast.makeText(this, "AI → TG 붙여넣기 완료 (ACTION_PASTE)", Toast.LENGTH_SHORT).show()
+      }
     } else {
       Toast.makeText(this, "붙여넣기 실패: 입력창을 찾았지만 텍스트 삽입에 실패했습니다.", Toast.LENGTH_SHORT).show()
     }
@@ -260,6 +278,37 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     return node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
   }
 
+  private fun clickSendButton(roots: List<AccessibilityNodeInfo>): Boolean {
+    roots.forEach { root ->
+      val sendButton = findSendButton(root)
+      if (sendButton != null) {
+        return sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+      }
+    }
+    return false
+  }
+
+  private fun findSendButton(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+    if (node == null) return null
+    if (isSendButton(node)) return node
+    for (index in 0 until node.childCount) {
+      val found = findSendButton(node.getChild(index))
+      if (found != null) return found
+    }
+    return null
+  }
+
+  private fun isSendButton(node: AccessibilityNodeInfo): Boolean {
+    if (!node.isEnabled) return false
+    val textValue = node.text?.toString().orEmpty()
+    val descriptionValue = node.contentDescription?.toString().orEmpty()
+    val viewIdValue = node.viewIdResourceName.orEmpty()
+    val combined = "$textValue $descriptionValue $viewIdValue".lowercase()
+    val looksLikeSend = combined.contains("send") || combined.contains("전송") || combined.contains("보내기")
+    if (!looksLikeSend) return false
+    return node.isClickable || node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK }
+  }
+
   companion object {
     private const val TAG = "CopyBridgeA11y"
     private const val MAX_COPY_LINES = 80
@@ -291,6 +340,10 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     }
 
     fun requestPasteAiToTelegram(context: Context): Boolean {
+      return requestPasteAiToTelegram(context, false)
+    }
+
+    fun requestPasteAiToTelegram(context: Context, autoSend: Boolean): Boolean {
       val service = activeService
 
       if (service == null) {
@@ -298,7 +351,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         return false
       }
 
-      service.handlePasteAiToTelegramRequest()
+      service.handlePasteAiToTelegramRequest(autoSend)
       return true
     }
   }
