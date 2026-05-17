@@ -176,7 +176,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       .mapNotNull { candidate ->
         val cleaned = normalizeCandidateText(candidate.text)
         if (cleaned.isBlank()) return@mapNotNull null
-        if (shouldIgnoreText(cleaned)) return@mapNotNull null
+        if (shouldIgnoreMessageText(cleaned)) return@mapNotNull null
         candidate.copy(text = cleaned)
       }
       .sortedWith(compareBy<TextCandidate> { it.top }.thenBy { it.left })
@@ -236,6 +236,24 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     return raw
       .replace(Regex("\\s+"), " ")
       .trim()
+  }
+
+  private fun shouldIgnoreMessageText(text: String): Boolean {
+    val lower = text.lowercase()
+
+    val exactUiTexts = setOf(
+      "telegram", "copybridge", "bridge",
+      "메시지", "봇", "봇 메뉴", "돌아가기",
+      "안 읽은 메시지", "프로필 사진", "icon 프로필 사진 설정",
+      "이모지, 스티커 및 gif", "미디어 첨부", "음성 메시지 녹음", "옵션 더 보기",
+      "전송: 켬", "전송: 끔",
+      "텔레그램 답변복사", "텔레그램으로 전송"
+    )
+
+    if (text.length <= 1) return true
+    if (lower in exactUiTexts) return true
+
+    return false
   }
 
   private fun shouldIgnoreText(text: String): Boolean {
@@ -328,7 +346,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
     if (!rect.isEmpty() && (textValue.isNotBlank() || descriptionValue.isNotBlank())) {
       val normalizedText = normalizeCandidateText(textValue)
-      val ignored = if (normalizedText.isBlank()) false else shouldIgnoreText(normalizedText)
+      val areaIgnored = isInsideMessageArea(rect, rootRect)
+      val ignored = if (normalizedText.isBlank()) false else if (areaIgnored) shouldIgnoreMessageText(normalizedText) else shouldIgnoreText(normalizedText)
 
       output.add(
         "#${output.size} " +
