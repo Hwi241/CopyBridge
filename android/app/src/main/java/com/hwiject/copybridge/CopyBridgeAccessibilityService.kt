@@ -49,7 +49,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val candidates = collectTelegramTextCandidates(telegramRoots)
 
     if (candidates.isEmpty()) {
-      Toast.makeText(this, "Telegram에서 복사할 메시지를 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
+      Toast.makeText(this, "Telegram 메시지를 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
       return
     }
 
@@ -195,27 +195,36 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   ) {
     if (node == null) return
 
-    val text = node.text?.toString()?.trim()
-    if (!text.isNullOrBlank()) {
-      val rect = Rect()
-      node.getBoundsInScreen(rect)
+    val rect = Rect()
+    node.getBoundsInScreen(rect)
 
-      if (!rect.isEmpty()) {
-        output.add(
-          TextCandidate(
-            text = text,
-            top = rect.top,
-            bottom = rect.bottom,
-            left = rect.left,
-            right = rect.right
-          )
-        )
-      }
+    if (!rect.isEmpty()) {
+      val textValue = node.text?.toString()?.trim()
+      val descriptionValue = node.contentDescription?.toString()?.trim()
+      addTextCandidateIfPossible(textValue, rect, output)
+      addTextCandidateIfPossible(descriptionValue, rect, output)
     }
 
     for (index in 0 until node.childCount) {
       collectVisibleTextCandidates(node.getChild(index), output)
     }
+  }
+
+  private fun addTextCandidateIfPossible(
+    value: String?,
+    rect: Rect,
+    output: MutableList<TextCandidate>
+  ) {
+    if (value.isNullOrBlank()) return
+    output.add(
+      TextCandidate(
+        text = value,
+        top = rect.top,
+        bottom = rect.bottom,
+        left = rect.left,
+        right = rect.right
+      )
+    )
   }
 
   private fun normalizeCandidateText(raw: String): String {
@@ -229,7 +238,9 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
     val exactIgnores = setOf(
       "telegram", "copybridge", "bridge",
-      "답장", "복사", "전달", "고정", "수정", "삭제", "검색", "plain text",
+      "답장", "복사", "전달", "고정", "수정", "삭제", "검색",
+      "메시지", "프로필", "프로필 사진 설정", "icon 프로필 사진 설정",
+      "온라인", "알림", "뒤로", "통화", "비디오", "plain text",
       "복사: 전체", "복사: 마지막", "전송: 켬", "전송: 끔",
       "텔레그램 답변복사", "텔레그램으로 전송",
       "tg → ai 복사", "ai → tg 붙여넣기"
@@ -238,10 +249,12 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
     val partialIgnores = listOf(
       "저장한 메시지", "자세히 보기", "태그로 더 빠르게",
-      "메시지를 입력", "chatgpt에 답장",
+      "메시지를 입력", "메시지 입력", "chatgpt에 답장",
+      "프로필 사진", "마지막으로", "입력",
       "검색", "첨부", "이모티콘", "키보드",
-      "보내기", "전송", "더보기",
-      "menu", "reply", "copy", "forward", "pin", "edit", "delete", "saved messages"
+      "보내기", "전송", "더보기", "더 보기",
+      "menu", "reply", "copy", "forward", "pin", "edit", "delete",
+      "saved messages", "profile photo", "last seen", "type a message"
     )
     if (partialIgnores.any { lower.contains(it) }) return true
 
