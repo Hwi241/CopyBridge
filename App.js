@@ -2,6 +2,7 @@ import { StatusBar } from 'expo-status-bar';
 import {
   Alert,
   SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -17,91 +18,152 @@ export default function App() {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
 
-      <View style={styles.header}>
-        <Text style={styles.appName}>CopyBridge</Text>
-        <Text style={styles.subtitle}>
-          Telegram과 AI 앱 위에 떠 있는 복사·붙여넣기 보조 위젯
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.container}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.header}>
+          <Text style={styles.appName}>CopyBridge</Text>
+          <Text style={styles.subtitle}>
+            Telegram과 AI 앱 위에 떠 있는 복사·붙여넣기 보조 위젯
+          </Text>
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>최종 사용 방식</Text>
+
+          <View style={styles.flowBox}>
+            <Text style={styles.flowText}>Telegram + AI 앱을 반반 화면으로 열기</Text>
+            <Text style={styles.flowArrow}>↓</Text>
+            <Text style={styles.flowText}>CopyBridge 플로팅 위젯을 화면 위에 띄우기</Text>
+            <Text style={styles.flowArrow}>↓</Text>
+            <Text style={styles.flowText}>위젯 버튼으로 대화 복사 / 답변 붙여넣기</Text>
+          </View>
+        </View>
+
+        <View style={styles.previewCard}>
+          <View style={styles.previewHeader}>
+            <Text style={styles.sectionTitle}>플로팅 위젯 미리보기</Text>
+            <Text style={styles.previewCaption}>앱 화면 위에 떠 있는 형태</Text>
+          </View>
+
+          <View style={styles.mockScreen}>
+            <View style={styles.mockAppLeft}>
+              <Text style={styles.mockAppLabel}>Telegram</Text>
+              <View style={styles.mockBubbleWide} />
+              <View style={styles.mockBubbleShort} />
+              <View style={styles.mockBubbleMedium} />
+            </View>
+
+            <View style={styles.mockDivider} />
+
+            <View style={styles.mockAppRight}>
+              <Text style={styles.mockAppLabel}>AI App</Text>
+              <View style={styles.mockBubbleMedium} />
+              <View style={styles.mockBubbleWide} />
+              <View style={styles.mockBubbleShort} />
+            </View>
+
+            <View style={styles.floatingWidget}>
+              <Text style={styles.widgetTitle}>Bridge</Text>
+
+              <TouchableOpacity
+                style={styles.widgetButton}
+                activeOpacity={0.85}
+                onPress={() => showNextStepAlert('TG → AI 복사')}
+              >
+                <Text style={styles.widgetButtonText}>TG → AI 복사</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.widgetButton}
+                activeOpacity={0.85}
+                onPress={() => showNextStepAlert('AI → TG 붙여넣기')}
+              >
+                <Text style={styles.widgetButtonText}>AI → TG 붙여넣기</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          <Text style={styles.previewNotice}>
+            실제 구현 단계에서는 이 작은 패널이 Telegram/GPT 화면 위에 떠 있고,
+            메인 앱 화면은 권한 설정과 위젯 시작 용도로만 사용됩니다.
+            TG → AI 복사는 텔레그램 대화를 AI 앱에 보낼 때, AI → TG 붙여넣기는 AI 답변을 텔레그램 입력창에 넣을 때 사용합니다.
+          </Text>
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>필요한 준비</Text>
+          <View style={styles.permissionItem}>
+            <Text style={styles.permissionNumber}>01</Text>
+            <View style={styles.permissionTextWrap}>
+              <Text style={styles.permissionTitle}>다른 앱 위에 표시 권한</Text>
+              <Text style={styles.permissionDescription}>
+                텔레그램과 AI 앱 위에 작은 CopyBridge 위젯을 띄우기 위해 필요합니다.
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.divider} />
+
+          <View style={styles.permissionItem}>
+            <Text style={styles.permissionNumber}>02</Text>
+            <View style={styles.permissionTextWrap}>
+              <Text style={styles.permissionTitle}>접근성 권한</Text>
+              <Text style={styles.permissionDescription}>
+                텔레그램 화면의 텍스트를 읽고 입력창에 붙여넣기 위해 필요합니다.
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.actions}>
+          <TouchableOpacity
+            style={styles.secondaryButton}
+            activeOpacity={0.8}
+            onPress={() => showNextStepAlert('오버레이 권한 설정')}
+          >
+            <Text style={styles.secondaryButtonText}>오버레이 권한 설정</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.secondaryButton}
+            activeOpacity={0.8}
+            onPress={() => showNextStepAlert('접근성 권한 설정')}
+          >
+            <Text style={styles.secondaryButtonText}>접근성 권한 설정</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.primaryButton}
+            activeOpacity={0.8}
+            onPress={() => showNextStepAlert('떠 있는 위젯 시작')}
+          >
+            <Text style={styles.primaryButtonText}>떠 있는 위젯 시작</Text>
+          </TouchableOpacity>
+        </View>
+
+        <Text style={styles.notice}>
+          실제 대화 복사 / 답변 붙여넣기 버튼은 메인 화면이 아니라 플로팅 위젯 안에 들어갑니다.
         </Text>
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>최종 사용 방식</Text>
-
-        <View style={styles.flowBox}>
-          <Text style={styles.flowText}>Telegram + AI 앱을 반반 화면으로 열기</Text>
-          <Text style={styles.flowArrow}>↓</Text>
-          <Text style={styles.flowText}>CopyBridge 플로팅 위젯을 화면 위에 띄우기</Text>
-          <Text style={styles.flowArrow}>↓</Text>
-          <Text style={styles.flowText}>위젯 버튼으로 대화 복사 / 답변 붙여넣기</Text>
-        </View>
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>필요한 준비</Text>
-
-        <View style={styles.permissionItem}>
-          <Text style={styles.permissionNumber}>01</Text>
-          <View style={styles.permissionTextWrap}>
-            <Text style={styles.permissionTitle}>다른 앱 위에 표시 권한</Text>
-            <Text style={styles.permissionDescription}>
-              텔레그램과 AI 앱 위에 작은 CopyBridge 위젯을 띄우기 위해 필요합니다.
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.divider} />
-
-        <View style={styles.permissionItem}>
-          <Text style={styles.permissionNumber}>02</Text>
-          <View style={styles.permissionTextWrap}>
-            <Text style={styles.permissionTitle}>접근성 권한</Text>
-            <Text style={styles.permissionDescription}>
-              텔레그램 화면의 텍스트를 읽고 입력창에 붙여넣기 위해 필요합니다.
-            </Text>
-          </View>
-        </View>
-      </View>
-
-      <View style={styles.actions}>
-        <TouchableOpacity
-          style={styles.secondaryButton}
-          activeOpacity={0.8}
-          onPress={() => showNextStepAlert('오버레이 권한 설정')}
-        >
-          <Text style={styles.secondaryButtonText}>오버레이 권한 설정</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.secondaryButton}
-          activeOpacity={0.8}
-          onPress={() => showNextStepAlert('접근성 권한 설정')}
-        >
-          <Text style={styles.secondaryButtonText}>접근성 권한 설정</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.primaryButton}
-          activeOpacity={0.8}
-          onPress={() => showNextStepAlert('떠 있는 위젯 시작')}
-        >
-          <Text style={styles.primaryButtonText}>떠 있는 위젯 시작</Text>
-        </TouchableOpacity>
-      </View>
-
-      <Text style={styles.notice}>
-        실제 대화 복사 / 답변 붙여넣기 버튼은 메인 화면이 아니라 플로팅 위젯 안에 들어갑니다.
-      </Text>
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  safeArea: {
     flex: 1,
     backgroundColor: '#F7F4EF',
+  },
+  scroll: {
+    flex: 1,
+  },
+  container: {
     paddingHorizontal: 24,
     paddingTop: 56,
     paddingBottom: 28,
@@ -132,11 +194,31 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 8 },
     elevation: 3,
   },
+  previewCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 18,
+    marginBottom: 18,
+    shadowColor: '#000000',
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 3,
+  },
+  previewHeader: {
+    marginBottom: 14,
+  },
   sectionTitle: {
     fontSize: 18,
     fontWeight: '700',
     color: '#222222',
     marginBottom: 18,
+  },
+  previewCaption: {
+    marginTop: -12,
+    fontSize: 13,
+    lineHeight: 18,
+    color: '#817A70',
   },
   flowBox: {
     gap: 8,
@@ -151,6 +233,98 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#9A8D7C',
     marginLeft: 4,
+  },
+  mockScreen: {
+    height: 220,
+    borderRadius: 22,
+    backgroundColor: '#EEE7DC',
+    borderWidth: 1,
+    borderColor: '#DED6CB',
+    overflow: 'hidden',
+    flexDirection: 'row',
+    position: 'relative',
+  },
+  mockAppLeft: {
+    flex: 1,
+    backgroundColor: '#F9F7F3',
+    padding: 14,
+  },
+  mockAppRight: {
+    flex: 1,
+    backgroundColor: '#F3EFE8',
+    padding: 14,
+  },
+  mockDivider: {
+    width: 1,
+    backgroundColor: '#DED6CB',
+  },
+  mockAppLabel: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#817A70',
+    marginBottom: 16,
+  },
+  mockBubbleWide: {
+    width: '86%',
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#D8CDBF',
+    marginBottom: 12,
+  },
+  mockBubbleMedium: {
+    width: '68%',
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#D8CDBF',
+    marginBottom: 12,
+  },
+  mockBubbleShort: {
+    width: '48%',
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#D8CDBF',
+    marginBottom: 12,
+  },
+  floatingWidget: {
+    position: 'absolute',
+    right: 14,
+    top: 58,
+    width: 108,
+    borderRadius: 18,
+    backgroundColor: '#171717',
+    padding: 8,
+    shadowColor: '#000000',
+    shadowOpacity: 0.22,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 8,
+  },
+  widgetTitle: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  widgetButton: {
+    minHeight: 30,
+    borderRadius: 10,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+    marginBottom: 6,
+  },
+  widgetButtonText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#171717',
+  },
+  previewNotice: {
+    marginTop: 14,
+    fontSize: 13,
+    lineHeight: 19,
+    color: '#817A70',
   },
   permissionItem: {
     flexDirection: 'row',
@@ -212,7 +386,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   notice: {
-    marginTop: 'auto',
+    marginTop: 18,
     fontSize: 13,
     lineHeight: 19,
     color: '#817A70',
