@@ -49,7 +49,13 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val candidates = collectTelegramMessageCandidates(telegramRoots)
 
     if (candidates.isEmpty()) {
-      Toast.makeText(this, "Telegram 메시지를 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
+      val debugText = buildTelegramCopyDebugInfo(telegramRoots)
+      copyToClipboard(debugText)
+      Toast.makeText(
+        this,
+        "Telegram 메시지를 찾지 못했습니다. 진단 정보가 복사되었습니다.",
+        Toast.LENGTH_SHORT
+      ).show()
       return
     }
 
@@ -263,6 +269,95 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     return false
   }
 
+  private fun buildTelegramCopyDebugInfo(
+    roots: List<AccessibilityNodeInfo>
+  ): String {
+    val builder = StringBuilder()
+
+    builder.appendLine("[CopyBridge Telegram 복사 진단]")
+    builder.appendLine("reason=Telegram 메시지 후보 0개")
+    builder.appendLine("telegramRoots=${roots.size}")
+
+    roots.forEachIndexed { rootIndex, root ->
+      val rootRect = Rect()
+      root.getBoundsInScreen(rootRect)
+      val rootHeight = rootRect.height()
+      val topLimit = rootRect.top + (rootHeight * 0.18f).toInt()
+      val bottomLimit = rootRect.bottom - (rootHeight * 0.22f).toInt()
+
+      builder.appendLine("")
+      builder.appendLine("[root $rootIndex]")
+      builder.appendLine("package=${root.packageName}")
+      builder.appendLine("class=${root.className}")
+      builder.appendLine("rootBounds=${formatRect(rootRect)}")
+      builder.appendLine("messageAreaY=$topLimit..$bottomLimit")
+
+      val debugLines = mutableListOf<String>()
+      collectDebugTextLines(root, rootRect, debugLines)
+
+      if (debugLines.isEmpty()) {
+        builder.appendLine("rawTextCandidates=0")
+      } else {
+        builder.appendLine("rawTextCandidates=${debugLines.size}")
+        debugLines.take(MAX_DEBUG_LINES).forEach { line -> builder.appendLine(line) }
+        if (debugLines.size > MAX_DEBUG_LINES) {
+          builder.appendLine("...(debug lines limited: ${debugLines.size} -> $MAX_DEBUG_LINES)")
+        }
+      }
+    }
+
+    val result = builder.toString()
+    return if (result.length > MAX_DEBUG_CHARS) {
+      result.take(MAX_DEBUG_CHARS) + "\n...(debug chars limited)"
+    } else {
+      result
+    }
+  }
+
+  private fun collectDebugTextLines(
+    node: AccessibilityNodeInfo?,
+    rootRect: Rect,
+    output: MutableList<String>
+  ) {
+    if (node == null) return
+    if (output.size >= MAX_DEBUG_LINES) return
+
+    val rect = Rect()
+    node.getBoundsInScreen(rect)
+    val textValue = node.text?.toString()?.trim().orEmpty()
+    val descriptionValue = node.contentDescription?.toString()?.trim().orEmpty()
+
+    if (!rect.isEmpty() && (textValue.isNotBlank() || descriptionValue.isNotBlank())) {
+      val normalizedText = normalizeCandidateText(textValue)
+      val ignored = if (normalizedText.isBlank()) false else shouldIgnoreText(normalizedText)
+
+      output.add(
+        "#${output.size} " +
+        "bounds=${formatRect(rect)} " +
+        "insideMessageArea=${isInsideMessageArea(rect, rootRect)} " +
+        "ignoredText=$ignored " +
+        "class=${node.className} " +
+        "viewId=${node.viewIdResourceName} " +
+        "clickable=${node.isClickable} " +
+        "enabled=${node.isEnabled} " +
+        "text=\"${escapeDebugValue(textValue)}\" " +
+        "desc=\"${escapeDebugValue(descriptionValue)}\""
+      )
+    }
+
+    for (index in 0 until node.childCount) {
+      collectDebugTextLines(node.getChild(index), rootRect, output)
+    }
+  }
+
+  private fun formatRect(rect: Rect): String {
+    return "${rect.left},${rect.top},${rect.right},${rect.bottom}"
+  }
+
+  private fun escapeDebugValue(value: String): String {
+    return value.replace("\n", " ").replace("\r", " ").take(120)
+  }
+
   private fun buildCopyText(lines: List<String>): String {
     val body = lines.joinToString("\n")
     val limitedBody = if (body.length > MAX_COPY_CHARS) {
@@ -381,6 +476,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     private const val MAX_COPY_LINES = 80
     private const val MAX_COPY_CHARS = 8000
     private const val MAX_SINGLE_LINE_LENGTH = 600
+    private const val MAX_DEBUG_LINES = 60
+    private const val MAX_DEBUG_CHARS = 6000
     private var activeService: CopyBridgeAccessibilityService? = null
 
     fun isServiceActive(): Boolean = activeService != null
