@@ -1,6 +1,8 @@
 import { StatusBar } from 'expo-status-bar';
 import {
   Alert,
+  NativeModules,
+  Platform,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -15,6 +17,29 @@ export default function App() {
       '다음 단계에서 연결',
       `${label} 기능은 Android 네이티브 연결 단계에서 구현합니다. 현재 화면은 기능 구조를 정리하는 준비 화면입니다.`
     );
+  };
+
+  const runNativeAction = async (label, actionName) => {
+    const nativeModule = NativeModules.CopyBridgeNativeModule;
+
+    if (Platform.OS !== 'android') {
+      Alert.alert('Android 전용 기능', `${label} 기능은 Android에서만 사용할 수 있습니다.`);
+      return;
+    }
+
+    if (!nativeModule || typeof nativeModule[actionName] !== 'function') {
+      Alert.alert(
+        '네이티브 연결 필요',
+        `${label} 기능은 실제 Android APK에서 연결됩니다. Expo Go에서는 사용할 수 없습니다.`
+      );
+      return;
+    }
+
+    try {
+      await nativeModule[actionName]();
+    } catch (error) {
+      Alert.alert('실행 실패', `${label} 기능을 실행하지 못했습니다.`);
+    }
   };
 
   return (
@@ -125,7 +150,7 @@ export default function App() {
           <TouchableOpacity
             style={styles.secondaryButton}
             activeOpacity={0.8}
-            onPress={() => showNextStepAlert('오버레이 권한 설정')}
+            onPress={() => runNativeAction('오버레이 권한 설정', 'openOverlaySettings')}
           >
             <Text style={styles.secondaryButtonText}>오버레이 권한 설정</Text>
           </TouchableOpacity>
@@ -133,7 +158,7 @@ export default function App() {
           <TouchableOpacity
             style={styles.secondaryButton}
             activeOpacity={0.8}
-            onPress={() => showNextStepAlert('접근성 권한 설정')}
+            onPress={() => runNativeAction('접근성 권한 설정', 'openAccessibilitySettings')}
           >
             <Text style={styles.secondaryButtonText}>접근성 권한 설정</Text>
           </TouchableOpacity>
@@ -141,7 +166,7 @@ export default function App() {
           <TouchableOpacity
             style={styles.primaryButton}
             activeOpacity={0.8}
-            onPress={() => showNextStepAlert('떠 있는 위젯 시작')}
+            onPress={() => runNativeAction('떠 있는 위젯 시작', 'startFloatingWidget')}
           >
             <Text style={styles.primaryButtonText}>떠 있는 위젯 시작</Text>
           </TouchableOpacity>
