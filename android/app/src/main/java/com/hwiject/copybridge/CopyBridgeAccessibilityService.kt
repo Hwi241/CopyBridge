@@ -150,50 +150,130 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     return lower.contains("telegram")
   }
 
-  private fun collectVisibleTexts(node: AccessibilityNodeInfo?, output: MutableList<String>) {
+  private data class TextCandidate(
+    val text: String,
+    val top: Int,
+    val bottom: Int,
+    val left: Int,
+    val right: Int
+  )
+
+  private fun collectTelegramTextCandidates(roots: List<AccessibilityNodeInfo>): List<TextCandidate> {
+    val rawCandidates = mutableListOf<TextCandidate>()
+
+    roots.forEach { root ->
+      collectVisibleTextCandidates(root, rawCandidates)
+    }
+
+    val sorted = rawCandidates
+      .mapNotNull { candidate ->
+        val cleaned = normalizeCandidateText(candidate.text)
+        if (cleaned.isBlank()) return@mapNotNull null
+        if (shouldIgnoreText(cleaned)) return@mapNotNull null
+        candidate.copy(text = cleaned)
+      }
+      .sortedWith(compareBy<TextCandidate> { it.top }.thenBy { it.left })
+
+    val result = mutableListOf<TextCandidate>()
+    var previousText = ""
+
+    sorted.forEach { candidate ->
+      if (candidate.text == previousText) return@forEach
+      result.add(candidate)
+      previousText = candidate.text
+    }
+
+    return result.takeLast(MAX_COPY_LINES)
+  }
+
+  private fun collectVisibleTextCandidates(
+    node: AccessibilityNodeInfo?,
+    output: MutableList<TextCandidate>
+  ) {
     if (node == null) return
 
     val text = node.text?.toString()?.trim()
     if (!text.isNullOrBlank()) {
-      output.add(text)
+      val rect = Rect()
+      node.getBoundsInScreen(rect)
+
+      if (!rect.isEmpty) {
+        output.add(
+          TextCandidate(
+            text = text,
+            top = rect.top,
+            bottom = rect.bottom,
+            left = rect.left,
+            right = rect.right
+          )
+        )
+      }
     }
 
     for (index in 0 until node.childCount) {
-      collectVisibleTexts(node.getChild(index), output)
+      collectVisibleTextCandidates(node.getChild(index), output)
     }
   }
 
-  private fun cleanTextLines(rawTexts: List<String>): List<String> {
-    val result = mutableListOf<String>()
-    var previous = ""
-
-    rawTexts.forEach { raw ->
-      val cleaned = raw
-        .replace(Regex("\\s+"), " ")
-        .trim()
-
-      if (cleaned.isBlank()) return@forEach
-      if (cleaned == previous) return@forEach
-      if (shouldIgnoreText(cleaned)) return@forEach
-
-      result.add(cleaned)
-      previous = cleaned
-    }
-
-    return result.take(MAX_COPY_LINES)
+  private fun normalizeCandidateText(raw: String): String {
+    return raw
+      .replace(Regex("\\s+"), " ")
+      .trim()
   }
 
   private fun shouldIgnoreText(text: String): Boolean {
     val lower = text.lowercase()
 
-    if (lower == "telegram") return true
-    if (lower == "copybridge") return true
-    if (lower == "bridge") return true
-    if (lower == "복사: 전체") return true
-    if (lower == "복사: 마지막") return true
-    if (lower == "전송: 켬") return true
-    if (lower == "전송: 끔") return true
+    val exactIgnores = setOf(
+      "telegram",
+      "copybridge",
+      "bridge",
+      "답장",
+      "복사",
+      "전달",
+      "고정",
+      "수정",
+      "삭제",
+      "검색",
+      "plain text",
+      "복사: 전체",
+      "복사: 마지막",
+      "전송: 켬",
+      "전송: 끔",
+      "텔레그램 답변복사",
+      "텔레그램으로 전송",
+      "tg → ai 복사",
+      "ai → tg 붙여넣기"
+    )
+
+    if (lower in exactIgnores) return true
+
+    val partialIgnores = listOf(
+      "저장한 메시지",
+      "자세히 보기",
+      "태그로 더 빠르게",
+      "메시지를 입력",
+      "chatgpt에 답장",
+      "검색",
+      "첨부",
+      "이모티콘",
+      "키보드",
+      "보내기",
+      "전송",
+      "더보기",
+      "menu",
+      "reply",
+      "copy",
+      "forward",
+      "pin",
+      "edit",
+      "delete",
+      "saved messages"
+    )
+
+    if (partialIgnores.any { lower.contains(it) }) return true
     if (text.length > MAX_SINGLE_LINE_LENGTH) return true
+    if (text.length <= 1) return true
 
     return false
   }
@@ -326,16 +406,34 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   private fun isSendButton(node: AccessibilityNodeInfo): Boolean {
     if (!node.isEnabled) return false
 
-    val textValue = node.text?.toString().orEmpty()
-    val descriptionValue = node.contentDescription?.toString().orEmpty()
+    val textValue = node.text?.toString()?.trim().orEmpty()
+    val descriptionValue = node.contentDescription?.toString()?.trim().orEmpty()
     val viewIdValue = node.viewIdResourceName.orEmpty()
 
-    val combined = "$textValue $descriptionValue $viewIdValue".lowercase()
+    val lowerText = textValue.lowercase()
+    val lowerDescription = descriptionValue.lowercase()
+    val lowerViewId = viewIdValue.lowercase()
+
+    val textLooksLikeSend =
+      lowerText == "send" ||
+      lowerText == "전송" ||
+      lowerText == "보내기"
+
+    val descriptionLooksLikeSend =
+      lowerDescription == "send" ||
+      lowerDescription.contains("send message") ||
+      lowerDescription.contains("전송") ||
+      lowerDescription.contains("보내기")
+
+    val viewIdLooksLikeSend =
+      lowerViewId.contains("send") ||
+      lowerViewId.contains("chat_message_send") ||
+      lowerViewId.contains("button_send")
 
     val looksLikeSend =
-      combined.contains("send") ||
-      combined.contains("전송") ||
-      combined.contains("보내기")
+      textLooksLikeSend ||
+      descriptionLooksLikeSend ||
+      viewIdLooksLikeSend
 
     if (!looksLikeSend) return false
 

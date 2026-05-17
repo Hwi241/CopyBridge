@@ -44,10 +44,10 @@ class FloatingWidgetService : Service() {
     val titleTextSize: Float,
     val headerButtonSize: Int
   ) {
-    SMALL("S", 18, 14, 16, 220, 64, 42, 11f, 11f, 42),
-    MEDIUM("M", 22, 18, 20, 260, 74, 46, 12f, 12f, 48),
-    LARGE("L", 24, 20, 22, 300, 84, 50, 13f, 13f, 52),
-    EXTRA_LARGE("XL", 26, 22, 24, 340, 94, 54, 14f, 14f, 56)
+    SMALL("S", 22, 18, 20, 260, 74, 46, 12f, 12f, 48),
+    MEDIUM("M", 24, 20, 22, 300, 84, 50, 13f, 13f, 52),
+    LARGE("L", 26, 22, 24, 340, 94, 54, 14f, 14f, 56),
+    EXTRA_LARGE("XL", 28, 24, 26, 380, 104, 58, 15f, 15f, 60)
   }
 
   private enum class CopyMode(
@@ -246,31 +246,17 @@ class FloatingWidgetService : Service() {
       ).show()
     }
 
-    val copyButton = createWhiteButton("TG → AI 복사", size.buttonTextSize) {
+    val copyButton = createWhiteButton("텔레그램 답변복사", size.buttonTextSize) {
       CopyBridgeAccessibilityService.requestCopyTelegramToAi(this, copyMode.key)
     }
 
-    val pasteButton = createWhiteButton("AI → TG 붙여넣기", size.buttonTextSize) {
+    val pasteButton = createWhiteButton("텔레그램으로 전송", size.buttonTextSize) {
       CopyBridgeAccessibilityService.requestPasteAiToTelegram(this, autoSendEnabled)
     }
 
     panel.addView(
       header,
       LinearLayout.LayoutParams(size.contentWidth, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-        bottomMargin = 10
-      }
-    )
-
-    panel.addView(
-      copyModeButton,
-      LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply {
-        bottomMargin = 10
-      }
-    )
-
-    panel.addView(
-      autoSendButton,
-      LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply {
         bottomMargin = 10
       }
     )
@@ -283,8 +269,22 @@ class FloatingWidgetService : Service() {
     )
 
     panel.addView(
+      copyModeButton,
+      LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply {
+        bottomMargin = 10
+      }
+    )
+
+    panel.addView(
       pasteButton,
-      LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight)
+      LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply {
+        bottomMargin = 10
+      }
+    )
+
+    panel.addView(
+      autoSendButton,
+      LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight)
     )
 
     panel.setOnTouchListener { _, event ->
