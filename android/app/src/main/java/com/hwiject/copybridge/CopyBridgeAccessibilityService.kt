@@ -633,7 +633,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     var inBlock = false
     val current = StringBuilder()
     for (line in lines) {
-      if (line.trimStart().startsWith("\`\`\`") || line.trimStart().startsWith("\`\`\`")) {
+      if (line.trimStart().startsWith("```") || line.trimStart().startsWith("```")) {
         if (inBlock) {
           codeBlocks.add(current.toString().trim())
           current.clear()
@@ -655,6 +655,15 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     if (text.length < 30) return false
     val lower = text.lowercase()
     return codeKeywords.any { lower.contains(it) }
+  }
+
+  private fun collectAllTexts(node: AccessibilityNodeInfo?, output: MutableList<String>) {
+    if (node == null) return
+    val text = node.text?.toString()?.trim()
+    if (!text.isNullOrBlank()) output.add(text)
+    val desc = node.contentDescription?.toString()?.trim()
+    if (!desc.isNullOrBlank()) output.add(desc)
+    for (i in 0 until node.childCount) collectAllTexts(node.getChild(i), output)
   }
 
   companion object {
@@ -822,13 +831,6 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         Toast.makeText(context, "코드 전송에 실패했습니다. 진단 정보가 복사되었습니다.", Toast.LENGTH_SHORT).show()
       }
       return true
-    }
-
-    private fun collectAllTexts(node: AccessibilityNodeInfo?, output: MutableList<String>) {
-      if (node == null) return
-      val text = node.text?.toString()?.trim()
-      if (!text.isNullOrBlank()) output.add(text)
-      for (i in 0 until node.childCount) collectAllTexts(node.getChild(i), output)
     }
   }
 }
