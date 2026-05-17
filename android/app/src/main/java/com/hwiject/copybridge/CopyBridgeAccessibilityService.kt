@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -65,18 +66,37 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
   private fun handlePasteAiToTelegramRequest() {
     val root = rootInActiveWindow
-    val packageName = lastPackageName ?: root?.packageName?.toString() ?: "unknown"
 
     if (root == null) {
       Toast.makeText(this, "현재 입력창을 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
       return
     }
 
-    Toast.makeText(
-      this,
-      "AI → TG 붙여넣기 준비됨: $packageName",
-      Toast.LENGTH_SHORT
-    ).show()
+    val clipboardText = readClipboardText()
+    if (clipboardText.isBlank()) {
+      Toast.makeText(this, "클립보드에 붙여넣을 텍스트가 없습니다.", Toast.LENGTH_SHORT).show()
+      return
+    }
+
+    val editableNode = findEditableNode(root)
+    if (editableNode == null) {
+      val packageName = lastPackageName ?: root.packageName?.toString() ?: "unknown"
+      Toast.makeText(this, "입력창을 찾지 못했습니다: $packageName", Toast.LENGTH_SHORT).show()
+      return
+    }
+
+    val setTextSuccess = setTextToNode(editableNode, clipboardText)
+    val pasteSuccess = if (!setTextSuccess) {
+      pasteClipboardToNode(editableNode)
+    } else {
+      false
+    }
+
+    if (setTextSuccess || pasteSuccess) {
+      Toast.makeText(this, "AI → TG 붙여넣기 완료", Toast.LENGTH_SHORT).show()
+    } else {
+      Toast.makeText(this, "입력창에 텍스트를 넣지 못했습니다.", Toast.LENGTH_SHORT).show()
+    }
   }
 
   private fun collectVisibleTexts(node: AccessibilityNodeInfo?, output: MutableList<String>) {
@@ -138,6 +158,58 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
     val clip = ClipData.newPlainText("CopyBridge Telegram Text", text)
     clipboard.setPrimaryClip(clip)
+  }
+
+  private fun readClipboardText(): String {
+    val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+    val clip = clipboard.primaryClip ?: return ""
+    if (clip.itemCount <= 0) return ""
+
+    return clip.getItemAt(0)
+      ?.coerceToText(this)
+      ?.toString()
+      ?.trim()
+      ?: ""
+  }
+
+  private fun findEditableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+    if (node == null) return null
+
+    if (isEditableNode(node)) {
+      return node
+    }
+
+    for (index in 0 until node.childCount) {
+      val found = findEditableNode(node.getChild(index))
+      if (found != null) return found
+    }
+
+    return null
+  }
+
+  private fun isEditableNode(node: AccessibilityNodeInfo): Boolean {
+    val className = node.className?.toString().orEmpty()
+
+    if (node.isEditable) return true
+    if (className.contains("EditText", ignoreCase = true)) return true
+
+    return false
+  }
+
+  private fun setTextToNode(node: AccessibilityNodeInfo, text: String): Boolean {
+    val arguments = Bundle().apply {
+      putCharSequence(
+        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+        text
+      )
+    }
+
+    return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+  }
+
+  private fun pasteClipboardToNode(node: AccessibilityNodeInfo): Boolean {
+    node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+    return node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
   }
 
   companion object {
