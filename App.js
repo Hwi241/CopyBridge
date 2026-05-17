@@ -170,6 +170,14 @@ export default function App() {
           >
             <Text style={styles.primaryButtonText}>떠 있는 위젯 시작</Text>
           </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.secondaryButton}
+            activeOpacity={0.8}
+            onPress={() => runNativeAction('떠 있는 위젯 끄기', 'stopFloatingWidget')}
+          >
+            <Text style={styles.secondaryButtonText}>떠 있는 위젯 끄기</Text>
+          </TouchableOpacity>
         </View>
 
         <Text style={styles.notice}>

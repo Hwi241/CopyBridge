@@ -59,4 +59,16 @@ class CopyBridgeNativeModule(
  promise.reject("START_FLOATING_WIDGET_FAILED", error)
  }
  }
+
+ @ReactMethod
+ fun stopFloatingWidget(promise: Promise) {
+ try {
+ val intent = Intent(reactContext, FloatingWidgetService::class.java)
+ reactContext.stopService(intent)
+ Toast.makeText(reactContext, "CopyBridge 위젯을 종료했습니다.", Toast.LENGTH_SHORT).show()
+ promise.resolve(true)
+ } catch (error: Exception) {
+ promise.reject("STOP_FLOATING_WIDGET_FAILED", error)
+ }
+ }
 }

@@ -123,13 +123,49 @@ class FloatingWidgetService : Service() {
       elevation = 12f
     }
 
+    val header = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+    }
+
     val title = TextView(this).apply {
       text = "Bridge"
       setTextColor(Color.WHITE)
       textSize = 11f
       typeface = Typeface.DEFAULT_BOLD
-      gravity = Gravity.CENTER
+      gravity = Gravity.CENTER_VERTICAL
     }
+
+    val closeButton = TextView(this).apply {
+      text = "×"
+      setTextColor(Color.WHITE)
+      textSize = 18f
+      typeface = Typeface.DEFAULT_BOLD
+      gravity = Gravity.CENTER
+      background = roundedBackground(Color.parseColor("#333333"), 12f)
+      setOnClickListener {
+        Toast.makeText(this@FloatingWidgetService, "CopyBridge 위젯을 종료합니다.", Toast.LENGTH_SHORT).show()
+        stopSelf()
+      }
+      setOnTouchListener { view, event ->
+        when (event.action) {
+          MotionEvent.ACTION_DOWN -> view.alpha = 0.55f
+          MotionEvent.ACTION_UP,
+          MotionEvent.ACTION_CANCEL -> view.alpha = 1f
+        }
+        false
+      }
+    }
+
+    header.addView(
+      title,
+      LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+    )
+
+    header.addView(
+      closeButton,
+      LinearLayout.LayoutParams(42, 42)
+    )
 
     val copyButton = createWidgetButton("TG → AI 복사") {
       CopyBridgeAccessibilityService.requestCopyTelegramToAi(this)
@@ -140,7 +176,7 @@ class FloatingWidgetService : Service() {
     }
 
     panel.addView(
-      title,
+      header,
       LinearLayout.LayoutParams(220, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
         bottomMargin = 10
       }
@@ -175,6 +211,18 @@ class FloatingWidgetService : Service() {
       background = roundedBackground(Color.WHITE, 12f)
       setPadding(8, 0, 8, 0)
       setOnClickListener { onClick() }
+      setOnTouchListener { view, event ->
+        when (event.action) {
+          MotionEvent.ACTION_DOWN -> {
+            view.alpha = 0.55f
+          }
+          MotionEvent.ACTION_UP,
+          MotionEvent.ACTION_CANCEL -> {
+            view.alpha = 1f
+          }
+        }
+        false
+      }
       minHeight = 0
       minimumHeight = 0
       includeFontPadding = false

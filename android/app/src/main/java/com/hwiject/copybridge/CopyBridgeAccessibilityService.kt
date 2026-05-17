@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -65,38 +66,78 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   }
 
   private fun handlePasteAiToTelegramRequest() {
-    val root = rootInActiveWindow
+    val roots = getCandidateRoots()
 
-    if (root == null) {
-      Toast.makeText(this, "현재 입력창을 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
+    if (roots.isEmpty()) {
+      Toast.makeText(this, "현재 화면 정보를 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
+      return
+    }
+
+    val editableNode = findEditableNodeFromRoots(roots)
+    if (editableNode == null) {
+      val packageNames = roots
+        .mapNotNull { it.packageName?.toString() }
+        .distinct()
+        .joinToString(", ")
+        .ifBlank { "unknown" }
+      Toast.makeText(this, "입력창을 찾지 못했습니다: $packageNames", Toast.LENGTH_SHORT).show()
       return
     }
 
     val clipboardText = readClipboardText()
-    if (clipboardText.isBlank()) {
-      Toast.makeText(this, "클립보드에 붙여넣을 텍스트가 없습니다.", Toast.LENGTH_SHORT).show()
-      return
+
+    if (clipboardText.isNotBlank()) {
+      val setTextSuccess = setTextToNode(editableNode, clipboardText)
+      if (setTextSuccess) {
+        Toast.makeText(this, "AI → TG 붙여넣기 완료 (SET_TEXT)", Toast.LENGTH_SHORT).show()
+        return
+      }
     }
 
-    val editableNode = findEditableNode(root)
-    if (editableNode == null) {
-      val packageName = lastPackageName ?: root.packageName?.toString() ?: "unknown"
-      Toast.makeText(this, "입력창을 찾지 못했습니다: $packageName", Toast.LENGTH_SHORT).show()
-      return
-    }
-
-    val setTextSuccess = setTextToNode(editableNode, clipboardText)
-    val pasteSuccess = if (!setTextSuccess) {
-      pasteClipboardToNode(editableNode)
+    val pasteSuccess = pasteClipboardToNode(editableNode)
+    if (pasteSuccess) {
+      Toast.makeText(this, "AI → TG 붙여넣기 완료 (ACTION_PASTE)", Toast.LENGTH_SHORT).show()
     } else {
-      false
+      Toast.makeText(this, "붙여넣기 실패: 입력창을 찾았지만 텍스트 삽입에 실패했습니다.", Toast.LENGTH_SHORT).show()
+    }
+  }
+
+  private fun getCandidateRoots(): List<AccessibilityNodeInfo> {
+    val results = mutableListOf<AccessibilityNodeInfo>()
+    val tgPackage = "org.telegram"
+
+    val activeRoot = rootInActiveWindow
+    if (activeRoot != null) {
+      val pkg = activeRoot.packageName?.toString() ?: ""
+      if (pkg == tgPackage) {
+        results.add(activeRoot)
+        return results
+      }
+      results.add(activeRoot)
     }
 
-    if (setTextSuccess || pasteSuccess) {
-      Toast.makeText(this, "AI → TG 붙여넣기 완료", Toast.LENGTH_SHORT).show()
-    } else {
-      Toast.makeText(this, "입력창에 텍스트를 넣지 못했습니다.", Toast.LENGTH_SHORT).show()
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      val displays = windows ?: emptyList()
+      for (windowInfo in displays) {
+        val windowRoot = windowInfo.root ?: continue
+        val pkg = windowInfo.root?.packageName?.toString() ?: ""
+        if (pkg == tgPackage) {
+          results.add(0, windowRoot)
+          return results
+        }
+        results.add(windowRoot)
+      }
     }
+
+    return results
+  }
+
+  private fun findEditableNodeFromRoots(roots: List<AccessibilityNodeInfo>): AccessibilityNodeInfo? {
+    for (root in roots) {
+      val found = findEditableNode(root)
+      if (found != null) return found
+    }
+    return null
   }
 
   private fun collectVisibleTexts(node: AccessibilityNodeInfo?, output: MutableList<String>) {
