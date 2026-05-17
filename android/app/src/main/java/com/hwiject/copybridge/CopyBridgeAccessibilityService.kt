@@ -5,6 +5,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Rect
+import android.os.Handler
+import android.os.Looper
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -89,7 +91,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     if (clipboardText.isNotBlank()) {
       val setTextSuccess = setTextToNode(editableNode, clipboardText)
       if (setTextSuccess) {
-        handlePasteSuccess("SET_TEXT", autoSend, telegramRoots)
+        handlePasteSuccess("SET_TEXT", autoSend, editableNode)
         return
       }
     }
@@ -97,7 +99,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val pasteSuccess = pasteClipboardToNode(editableNode)
     if (pasteSuccess) {
       val mode = if (clipboardText.isBlank()) "ACTION_PASTE" else "ACTION_PASTE fallback"
-      handlePasteSuccess(mode, autoSend, telegramRoots)
+      handlePasteSuccess(mode, autoSend, editableNode)
       return
     }
 
@@ -111,19 +113,43 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   private fun handlePasteSuccess(
     mode: String,
     autoSend: Boolean,
-    telegramRoots: List<AccessibilityNodeInfo>
+    editableNode: AccessibilityNodeInfo
   ) {
     if (!autoSend) {
       Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode", Toast.LENGTH_SHORT).show()
       return
     }
 
-    val sent = clickSendButton(telegramRoots)
-    if (sent) {
-      Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode + 전송", Toast.LENGTH_SHORT).show()
-    } else {
-      Toast.makeText(this, "붙여넣기는 완료, Telegram 전송 버튼은 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
-    }
+    scheduleAutoSendAfterPaste(mode, editableNode)
+  }
+
+  private fun scheduleAutoSendAfterPaste(
+    mode: String,
+    editableNode: AccessibilityNodeInfo
+  ) {
+    Handler(Looper.getMainLooper()).postDelayed({
+      val firstRoots = getTelegramRoots()
+      val firstSent = clickSendButton(firstRoots)
+
+      if (firstSent) {
+        Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode + 전송", Toast.LENGTH_SHORT).show()
+        return@postDelayed
+      }
+
+      editableNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+      editableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+
+      Handler(Looper.getMainLooper()).postDelayed({
+        val secondRoots = getTelegramRoots()
+        val secondSent = clickSendButton(secondRoots)
+
+        if (secondSent) {
+          Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode + 전송", Toast.LENGTH_SHORT).show()
+        } else {
+          Toast.makeText(this, "붙여넣기는 완료, Telegram 전송 버튼은 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
+        }
+      }, AUTO_SEND_SECOND_RETRY_DELAY_MS)
+    }, AUTO_SEND_FIRST_RETRY_DELAY_MS)
   }
 
   private fun getTelegramRoots(): List<AccessibilityNodeInfo> {
@@ -496,6 +522,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     private const val MAX_SINGLE_LINE_LENGTH = 600
     private const val MAX_DEBUG_LINES = 60
     private const val MAX_DEBUG_CHARS = 6000
+    private const val AUTO_SEND_FIRST_RETRY_DELAY_MS = 250L
+    private const val AUTO_SEND_SECOND_RETRY_DELAY_MS = 150L
     private var activeService: CopyBridgeAccessibilityService? = null
 
     fun isServiceActive(): Boolean = activeService != null
