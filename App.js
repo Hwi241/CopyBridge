@@ -140,7 +140,7 @@ export default function App() {
             <View style={styles.permissionTextWrap}>
               <Text style={styles.permissionTitle}>접근성 권한</Text>
               <Text style={styles.permissionDescription}>
-                텔레그램 화면의 텍스트를 읽고 입력창에 붙여넣기 위해 필요합니다.
+                텔레그램 화면의 텍스트를 읽고 입력창에 붙여넣기 위해 필요합니다. 버튼을 누른 뒤 설정 화면에서 "설치된 앱" 또는 "다운로드한 앱" 항목의 CopyBridge를 찾아 사용으로 켜주세요.
               </Text>
             </View>
           </View>

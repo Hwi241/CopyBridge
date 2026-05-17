@@ -27,6 +27,23 @@ class FloatingWidgetService : Service() {
   private var initialY = 0
   private var initialTouchX = 0f
   private var initialTouchY = 0f
+  private var widgetSize = WidgetSize.MEDIUM
+
+  private enum class WidgetSize(
+    val label: String,
+    val panelPaddingHorizontal: Int,
+    val panelPaddingVerticalTop: Int,
+    val panelPaddingVerticalBottom: Int,
+    val contentWidth: Int,
+    val buttonHeight: Int,
+    val buttonTextSize: Float,
+    val titleTextSize: Float,
+    val closeButtonSize: Int
+  ) {
+    SMALL("S", 14, 10, 12, 190, 56, 10f, 10f, 36),
+    MEDIUM("M", 18, 14, 16, 220, 64, 11f, 11f, 42),
+    LARGE("L", 22, 18, 20, 260, 74, 12f, 12f, 48)
+  }
 
   override fun onCreate() {
     super.onCreate()
@@ -115,10 +132,40 @@ class FloatingWidgetService : Service() {
     }
   }
 
+  private fun cycleWidgetSize() {
+    widgetSize = when (widgetSize) {
+      WidgetSize.SMALL -> WidgetSize.MEDIUM
+      WidgetSize.MEDIUM -> WidgetSize.LARGE
+      WidgetSize.LARGE -> WidgetSize.SMALL
+    }
+
+    val params = layoutParams ?: return
+    val currentX = params.x
+    val currentY = params.y
+
+    removeFloatingWidget()
+    showFloatingWidget()
+
+    layoutParams?.let { newParams ->
+      newParams.x = currentX
+      newParams.y = currentY
+      windowManager?.updateViewLayout(floatingView, newParams)
+    }
+
+    Toast.makeText(this, "위젯 크기: ${widgetSize.label}", Toast.LENGTH_SHORT).show()
+  }
+
   private fun createWidgetView(): View {
+    val size = widgetSize
+
     val panel = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
-      setPadding(18, 14, 18, 16)
+      setPadding(
+        size.panelPaddingHorizontal,
+        size.panelPaddingVerticalTop,
+        size.panelPaddingHorizontal,
+        size.panelPaddingVerticalBottom
+      )
       background = roundedBackground(Color.parseColor("#171717"), 18f)
       elevation = 12f
     }
@@ -131,9 +178,29 @@ class FloatingWidgetService : Service() {
     val title = TextView(this).apply {
       text = "Bridge"
       setTextColor(Color.WHITE)
-      textSize = 11f
+      textSize = size.titleTextSize
       typeface = Typeface.DEFAULT_BOLD
       gravity = Gravity.CENTER_VERTICAL
+    }
+
+    val sizeButton = TextView(this).apply {
+      text = size.label
+      setTextColor(Color.WHITE)
+      textSize = 13f
+      typeface = Typeface.DEFAULT_BOLD
+      gravity = Gravity.CENTER
+      background = roundedBackground(Color.parseColor("#333333"), 12f)
+      setOnClickListener {
+        cycleWidgetSize()
+      }
+      setOnTouchListener { view, event ->
+        when (event.action) {
+          MotionEvent.ACTION_DOWN -> view.alpha = 0.55f
+          MotionEvent.ACTION_UP,
+          MotionEvent.ACTION_CANCEL -> view.alpha = 1f
+        }
+        false
+      }
     }
 
     val closeButton = TextView(this).apply {
@@ -163,8 +230,15 @@ class FloatingWidgetService : Service() {
     )
 
     header.addView(
+      sizeButton,
+      LinearLayout.LayoutParams(size.closeButtonSize, size.closeButtonSize).apply {
+        rightMargin = 8
+      }
+    )
+
+    header.addView(
       closeButton,
-      LinearLayout.LayoutParams(42, 42)
+      LinearLayout.LayoutParams(size.closeButtonSize, size.closeButtonSize)
     )
 
     val copyButton = createWidgetButton("TG → AI 복사") {
@@ -177,21 +251,21 @@ class FloatingWidgetService : Service() {
 
     panel.addView(
       header,
-      LinearLayout.LayoutParams(220, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+      LinearLayout.LayoutParams(size.contentWidth, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
         bottomMargin = 10
       }
     )
 
     panel.addView(
       copyButton,
-      LinearLayout.LayoutParams(220, 64).apply {
+      LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply {
         bottomMargin = 10
       }
     )
 
     panel.addView(
       pasteButton,
-      LinearLayout.LayoutParams(220, 64)
+      LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight)
     )
 
     panel.setOnTouchListener { _, event ->
@@ -205,7 +279,7 @@ class FloatingWidgetService : Service() {
   private fun createWidgetButton(label: String, onClick: () -> Unit): Button {
     return Button(this).apply {
       text = label
-      textSize = 11f
+      textSize = size.buttonTextSize
       typeface = Typeface.DEFAULT_BOLD
       setTextColor(Color.parseColor("#171717"))
       background = roundedBackground(Color.WHITE, 12f)
