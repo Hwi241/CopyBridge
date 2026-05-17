@@ -38,7 +38,12 @@ yarn-error.*
 
 # generated native folders
 /ios
-/android
 .claude/
 AGENTS.md
 CLAUDE.md
+
+# Android local files
+android/local.properties
+android/**/local.properties
+android/.gradle/
+android/**/build/
