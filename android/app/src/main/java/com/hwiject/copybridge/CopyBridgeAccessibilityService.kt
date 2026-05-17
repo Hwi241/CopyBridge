@@ -38,7 +38,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     super.onDestroy()
   }
 
-  private fun handleCopyTelegramToAiRequest() {
+  private fun handleCopyTelegramToAiRequest(copyMode: String) {
     val root = rootInActiveWindow
 
     if (root == null) {
@@ -55,12 +55,19 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       return
     }
 
-    val result = buildCopyText(cleanedTexts)
+    val selectedTexts = if (copyMode == COPY_MODE_LAST) {
+      cleanedTexts.takeLast(1)
+    } else {
+      cleanedTexts
+    }
+
+    val result = buildCopyText(selectedTexts)
     copyToClipboard(result)
 
+    val modeLabel = if (copyMode == COPY_MODE_LAST) "마지막" else "전체"
     Toast.makeText(
       this,
-      "TG → AI 복사 완료: ${cleanedTexts.size}줄",
+      "TG → AI 복사 완료($modeLabel): ${selectedTexts.size}줄",
       Toast.LENGTH_SHORT
     ).show()
   }
@@ -258,6 +265,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     private const val MAX_COPY_LINES = 80
     private const val MAX_COPY_CHARS = 8000
     private const val MAX_SINGLE_LINE_LENGTH = 600
+    private const val COPY_MODE_ALL = "ALL"
+    private const val COPY_MODE_LAST = "LAST"
 
     private var activeService: CopyBridgeAccessibilityService? = null
 
@@ -266,6 +275,10 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     }
 
     fun requestCopyTelegramToAi(context: Context): Boolean {
+      return requestCopyTelegramToAi(context, COPY_MODE_ALL)
+    }
+
+    fun requestCopyTelegramToAi(context: Context, copyMode: String): Boolean {
       val service = activeService
 
       if (service == null) {
@@ -273,7 +286,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         return false
       }
 
-      service.handleCopyTelegramToAiRequest()
+      service.handleCopyTelegramToAiRequest(copyMode)
       return true
     }
 

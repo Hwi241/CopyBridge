@@ -1,4 +1,13 @@
-package com.hwiject.copybridge
+pa
+ private enum class CopyMode(
+ val key: String,
+ val label: String
+ ) {
+ ALL("ALL", "복사: 전체"),
+ LAST("LAST", "복사: 마지막")
+ }
+
+ckage com.hwiject.copybridge
 
 import android.app.Service
 import android.content.Intent
@@ -242,16 +251,48 @@ class FloatingWidgetService : Service() {
     )
 
     val copyButton = createWidgetButton("TG → AI 복사") {
-      CopyBridgeAccessibilityService.requestCopyTelegramToAi(this)
+      CopyBridgeAccessibilityService.requestCopyTelegramToAi(this, copyMode.key)
     }
 
     val pasteButton = createWidgetButton("AI → TG 붙여넣기") {
       CopyBridgeAccessibilityService.requestPasteAiToTelegram(this)
     }
 
+        val copyModeButton = TextView(this).apply {
+      text = copyMode.label
+      setTextColor(Color.WHITE)
+      textSize = size.buttonTextSize
+      typeface = Typeface.DEFAULT_BOLD
+      gravity = Gravity.CENTER
+      background = roundedBackground(Color.parseColor("#333333"), 12f)
+      setOnClickListener {
+        copyMode = when (copyMode) {
+          CopyMode.ALL -> CopyMode.LAST
+          CopyMode.LAST -> CopyMode.ALL
+        }
+        text = copyMode.label
+        Toast.makeText(this@FloatingWidgetService, copyMode.label, Toast.LENGTH_SHORT).show()
+      }
+      setOnTouchListener { view, event ->
+        when (event.action) {
+          MotionEvent.ACTION_DOWN -> view.alpha = 0.55f
+          MotionEvent.ACTION_UP,
+          MotionEvent.ACTION_CANCEL -> view.alpha = 1f
+        }
+        false
+      }
+    }
+
     panel.addView(
       header,
       LinearLayout.LayoutParams(size.contentWidth, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        bottomMargin = 10
+      }
+    )
+
+    panel.addView(
+      copyModeButton,
+      LinearLayout.LayoutParams(size.contentWidth, 42).apply {
         bottomMargin = 10
       }
     )
