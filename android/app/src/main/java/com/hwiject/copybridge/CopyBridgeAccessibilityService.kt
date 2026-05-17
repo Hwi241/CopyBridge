@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Rect
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -45,21 +46,17 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       return
     }
 
-    val rawTexts = mutableListOf<String>()
-    telegramRoots.forEach { root ->
-      collectVisibleTexts(root, rawTexts)
-    }
+    val candidates = collectTelegramTextCandidates(telegramRoots)
 
-    val cleanedTexts = cleanTextLines(rawTexts)
-    if (cleanedTexts.isEmpty()) {
-      Toast.makeText(this, "Telegram에서 복사할 텍스트를 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
+    if (candidates.isEmpty()) {
+      Toast.makeText(this, "Telegram에서 복사할 메시지를 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
       return
     }
 
     val selectedTexts = if (copyMode == COPY_MODE_LAST) {
-      cleanedTexts.takeLast(1)
+      candidates.takeLast(1).map { it.text }
     } else {
-      cleanedTexts
+      candidates.map { it.text }
     }
 
     val result = buildCopyText(selectedTexts)
@@ -68,7 +65,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val modeLabel = if (copyMode == COPY_MODE_LAST) "마지막" else "전체"
     Toast.makeText(
       this,
-      "TG → AI 복사 완료($modeLabel): ${selectedTexts.size}줄",
+      "TG → AI 복사 완료($modeLabel): ${selectedTexts.size}개",
       Toast.LENGTH_SHORT
     ).show()
   }
@@ -111,7 +108,11 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     }
   }
 
-  private fun handlePasteSuccess(mode: String, autoSend: Boolean, telegramRoots: List<AccessibilityNodeInfo>) {
+  private fun handlePasteSuccess(
+    mode: String,
+    autoSend: Boolean,
+    telegramRoots: List<AccessibilityNodeInfo>
+  ) {
     if (!autoSend) {
       Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode", Toast.LENGTH_SHORT).show()
       return
@@ -129,7 +130,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val candidates = mutableListOf<AccessibilityNodeInfo>()
 
     rootInActiveWindow?.let { root ->
-      if (isTelegramPackage(root.packageName?.toString().orEmpty())) {
+      val packageName = root.packageName?.toString().orEmpty()
+      if (isTelegramPackage(packageName)) {
         candidates.add(root)
       }
     }
@@ -146,8 +148,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   }
 
   private fun isTelegramPackage(packageName: String): Boolean {
-    val lower = packageName.lowercase()
-    return lower.contains("telegram")
+    return packageName.lowercase().contains("telegram")
   }
 
   private data class TextCandidate(
@@ -158,7 +159,9 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val right: Int
   )
 
-  private fun collectTelegramTextCandidates(roots: List<AccessibilityNodeInfo>): List<TextCandidate> {
+  private fun collectTelegramTextCandidates(
+    roots: List<AccessibilityNodeInfo>
+  ): List<TextCandidate> {
     val rawCandidates = mutableListOf<TextCandidate>()
 
     roots.forEach { root ->
@@ -197,7 +200,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       val rect = Rect()
       node.getBoundsInScreen(rect)
 
-      if (!rect.isEmpty) {
+      if (!rect.isEmpty()) {
         output.add(
           TextCandidate(
             text = text,
@@ -225,53 +228,23 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val lower = text.lowercase()
 
     val exactIgnores = setOf(
-      "telegram",
-      "copybridge",
-      "bridge",
-      "답장",
-      "복사",
-      "전달",
-      "고정",
-      "수정",
-      "삭제",
-      "검색",
-      "plain text",
-      "복사: 전체",
-      "복사: 마지막",
-      "전송: 켬",
-      "전송: 끔",
-      "텔레그램 답변복사",
-      "텔레그램으로 전송",
-      "tg → ai 복사",
-      "ai → tg 붙여넣기"
+      "telegram", "copybridge", "bridge",
+      "답장", "복사", "전달", "고정", "수정", "삭제", "검색", "plain text",
+      "복사: 전체", "복사: 마지막", "전송: 켬", "전송: 끔",
+      "텔레그램 답변복사", "텔레그램으로 전송",
+      "tg → ai 복사", "ai → tg 붙여넣기"
     )
-
     if (lower in exactIgnores) return true
 
     val partialIgnores = listOf(
-      "저장한 메시지",
-      "자세히 보기",
-      "태그로 더 빠르게",
-      "메시지를 입력",
-      "chatgpt에 답장",
-      "검색",
-      "첨부",
-      "이모티콘",
-      "키보드",
-      "보내기",
-      "전송",
-      "더보기",
-      "menu",
-      "reply",
-      "copy",
-      "forward",
-      "pin",
-      "edit",
-      "delete",
-      "saved messages"
+      "저장한 메시지", "자세히 보기", "태그로 더 빠르게",
+      "메시지를 입력", "chatgpt에 답장",
+      "검색", "첨부", "이모티콘", "키보드",
+      "보내기", "전송", "더보기",
+      "menu", "reply", "copy", "forward", "pin", "edit", "delete", "saved messages"
     )
-
     if (partialIgnores.any { lower.contains(it) }) return true
+
     if (text.length > MAX_SINGLE_LINE_LENGTH) return true
     if (text.length <= 1) return true
 
@@ -285,7 +258,6 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     } else {
       body
     }
-
     return "[Telegram 화면에서 복사한 텍스트]\n\n$limitedBody"
   }
 
@@ -299,12 +271,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
     val clip = clipboard.primaryClip ?: return ""
     if (clip.itemCount <= 0) return ""
-
-    return clip.getItemAt(0)
-      ?.coerceToText(this)
-      ?.toString()
-      ?.trim()
-      ?: ""
+    return clip.getItemAt(0)?.coerceToText(this)?.toString()?.trim() ?: ""
   }
 
   private fun findEditableNodeFromRoots(roots: List<AccessibilityNodeInfo>): AccessibilityNodeInfo? {
@@ -312,31 +279,21 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       val found = findEditableNode(root)
       if (found != null) return found
     }
-
     return null
   }
 
   private fun findEditableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
     if (node == null) return null
-
     val candidates = mutableListOf<AccessibilityNodeInfo>()
     collectEditableNodes(node, candidates)
-
     return candidates.firstOrNull { it.isFocused }
       ?: candidates.firstOrNull { it.isAccessibilityFocused }
       ?: candidates.lastOrNull()
   }
 
-  private fun collectEditableNodes(
-    node: AccessibilityNodeInfo?,
-    output: MutableList<AccessibilityNodeInfo>
-  ) {
+  private fun collectEditableNodes(node: AccessibilityNodeInfo?, output: MutableList<AccessibilityNodeInfo>) {
     if (node == null) return
-
-    if (isEditableNode(node)) {
-      output.add(node)
-    }
-
+    if (isEditableNode(node)) output.add(node)
     for (index in 0 until node.childCount) {
       collectEditableNodes(node.getChild(index), output)
     }
@@ -344,30 +301,22 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
   private fun isEditableNode(node: AccessibilityNodeInfo): Boolean {
     if (!node.isEnabled) return false
-
     val className = node.className?.toString().orEmpty()
     val hasSetTextAction = node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }
     val hasPasteAction = node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_PASTE }
-
     if (node.isEditable) return true
     if (className.contains("EditText", ignoreCase = true)) return true
     if (hasSetTextAction) return true
     if (hasPasteAction) return true
-
     return false
   }
 
   private fun setTextToNode(node: AccessibilityNodeInfo, text: String): Boolean {
     node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
     node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-
     val arguments = Bundle().apply {
-      putCharSequence(
-        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-        text
-      )
+      putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
     }
-
     return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
   }
 
@@ -384,59 +333,34 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         return sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
       }
     }
-
     return false
   }
 
   private fun findSendButton(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
     if (node == null) return null
-
-    if (isSendButton(node)) {
-      return node
-    }
-
+    if (isSendButton(node)) return node
     for (index in 0 until node.childCount) {
       val found = findSendButton(node.getChild(index))
       if (found != null) return found
     }
-
     return null
   }
 
   private fun isSendButton(node: AccessibilityNodeInfo): Boolean {
     if (!node.isEnabled) return false
-
     val textValue = node.text?.toString()?.trim().orEmpty()
     val descriptionValue = node.contentDescription?.toString()?.trim().orEmpty()
     val viewIdValue = node.viewIdResourceName.orEmpty()
-
     val lowerText = textValue.lowercase()
     val lowerDescription = descriptionValue.lowercase()
     val lowerViewId = viewIdValue.lowercase()
-
-    val textLooksLikeSend =
-      lowerText == "send" ||
-      lowerText == "전송" ||
-      lowerText == "보내기"
-
-    val descriptionLooksLikeSend =
-      lowerDescription == "send" ||
-      lowerDescription.contains("send message") ||
-      lowerDescription.contains("전송") ||
-      lowerDescription.contains("보내기")
-
-    val viewIdLooksLikeSend =
-      lowerViewId.contains("send") ||
-      lowerViewId.contains("chat_message_send") ||
-      lowerViewId.contains("button_send")
-
-    val looksLikeSend =
-      textLooksLikeSend ||
-      descriptionLooksLikeSend ||
-      viewIdLooksLikeSend
-
+    val textLooksLikeSend = lowerText == "send" || lowerText == "전송" || lowerText == "보내기"
+    val descriptionLooksLikeSend = lowerDescription == "send" ||
+      lowerDescription.contains("send message") || lowerDescription.contains("전송") || lowerDescription.contains("보내기")
+    val viewIdLooksLikeSend = lowerViewId.contains("send") ||
+      lowerViewId.contains("chat_message_send") || lowerViewId.contains("button_send")
+    val looksLikeSend = textLooksLikeSend || descriptionLooksLikeSend || viewIdLooksLikeSend
     if (!looksLikeSend) return false
-
     return node.isClickable || node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK }
   }
 
@@ -447,41 +371,32 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     private const val MAX_SINGLE_LINE_LENGTH = 600
     private const val COPY_MODE_ALL = "ALL"
     private const val COPY_MODE_LAST = "LAST"
-
     private var activeService: CopyBridgeAccessibilityService? = null
 
-    fun isServiceActive(): Boolean {
-      return activeService != null
-    }
+    fun isServiceActive(): Boolean = activeService != null
 
-    fun requestCopyTelegramToAi(context: Context): Boolean {
-      return requestCopyTelegramToAi(context, COPY_MODE_ALL)
-    }
+    fun requestCopyTelegramToAi(context: Context): Boolean =
+      requestCopyTelegramToAi(context, COPY_MODE_ALL)
 
     fun requestCopyTelegramToAi(context: Context, copyMode: String): Boolean {
       val service = activeService
-
       if (service == null) {
         Toast.makeText(context, "CopyBridge 접근성 권한을 먼저 켜주세요.", Toast.LENGTH_SHORT).show()
         return false
       }
-
       service.handleCopyTelegramToAiRequest(copyMode)
       return true
     }
 
-    fun requestPasteAiToTelegram(context: Context): Boolean {
-      return requestPasteAiToTelegram(context, false)
-    }
+    fun requestPasteAiToTelegram(context: Context): Boolean =
+      requestPasteAiToTelegram(context, false)
 
     fun requestPasteAiToTelegram(context: Context, autoSend: Boolean): Boolean {
       val service = activeService
-
       if (service == null) {
         Toast.makeText(context, "CopyBridge 접근성 권한을 먼저 켜주세요.", Toast.LENGTH_SHORT).show()
         return false
       }
-
       service.handlePasteAiToTelegramRequest(autoSend)
       return true
     }
