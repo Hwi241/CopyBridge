@@ -32,6 +32,7 @@ class FloatingWidgetService : Service() {
 
   private var widgetSize = WidgetSize.SMALL
   private var autoSendEnabled = false
+  private var replyCopyModeString: String = "FULL"
 
   private enum class WidgetSize(
     val label: String,
@@ -83,6 +84,7 @@ class FloatingWidgetService : Service() {
     val savedSizeLabel = prefs.getString(KEY_WIDGET_SIZE, WidgetSize.SMALL.label)
     widgetSize = WidgetSize.entries.firstOrNull { it.label == savedSizeLabel } ?: WidgetSize.SMALL
     autoSendEnabled = prefs.getBoolean(KEY_AUTO_SEND_ENABLED, false)
+    replyCopyModeString = prefs.getString(KEY_REPLY_COPY_MODE, "FULL") ?: "FULL"
   }
 
   private fun saveWidgetPreferences() {
@@ -90,6 +92,7 @@ class FloatingWidgetService : Service() {
     prefs.edit()
       .putString(KEY_WIDGET_SIZE, widgetSize.label)
       .putBoolean(KEY_AUTO_SEND_ENABLED, autoSendEnabled)
+      .putString(KEY_REPLY_COPY_MODE, replyCopyModeString)
       .apply()
   }
 
@@ -251,6 +254,13 @@ class FloatingWidgetService : Service() {
       LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize)
     )
 
+    val replyCopyLabel = if (replyCopyModeString == "LAST") "답변: 마지막" else "답변: 전체"
+    val replyCopyButton = createDarkButton(replyCopyLabel, size.buttonTextSize) {
+      replyCopyModeString = if (replyCopyModeString == "LAST") "FULL" else "LAST"
+      saveWidgetPreferences()
+      refreshWidgetAtSamePosition()
+    }
+
     val autoSendButton = createDarkButton(
       if (autoSendEnabled) "전송: 켬" else "전송: 끔",
       size.buttonTextSize
@@ -258,18 +268,21 @@ class FloatingWidgetService : Service() {
       autoSendEnabled = !autoSendEnabled
       saveWidgetPreferences()
       refreshWidgetAtSamePosition()
-      Toast.makeText(
-        this,
-        if (autoSendEnabled) "자동 전송: 켬" else "자동 전송: 끔",
-        Toast.LENGTH_SHORT
-      ).show()
     }
 
     val copyButton = createWhiteButton("텔레그램 답변복사", size.buttonTextSize) {
       CopyBridgeAccessibilityService.requestCopyTelegramToAi(this)
     }
 
-    val pasteButton = createWhiteButton("텔레그램으로 전송", size.buttonTextSize) {
+    val gptButton = createDarkButton("GPT로 보내기", size.buttonTextSize) {
+      CopyBridgeAccessibilityService.requestTelegramToGpt(this, replyCopyModeString)
+    }
+
+    val gptCodeButton = createDarkButton("GPT 코드 전송", size.buttonTextSize) {
+      CopyBridgeAccessibilityService.requestGptCodeToTelegram(this, autoSendEnabled)
+    }
+
+    val pasteButton = createTelegramBlueButton("텔레그램으로 전송", size.buttonTextSize) {
       CopyBridgeAccessibilityService.requestPasteAiToTelegram(this, autoSendEnabled)
     }
 
@@ -282,6 +295,27 @@ class FloatingWidgetService : Service() {
 
     panel.addView(
       copyButton,
+      LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply {
+        bottomMargin = 10
+      }
+    )
+
+    panel.addView(
+      replyCopyButton,
+      LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply {
+        bottomMargin = 10
+      }
+    )
+
+    panel.addView(
+      gptButton,
+      LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply {
+        bottomMargin = 10
+      }
+    )
+
+    panel.addView(
+      gptCodeButton,
       LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply {
         bottomMargin = 10
       }
@@ -361,6 +395,30 @@ class FloatingWidgetService : Service() {
     }
   }
 
+  private fun createTelegramBlueButton(
+    label: String,
+    textSizeValue: Float,
+    onClick: () -> Unit
+  ): Button {
+    return Button(this).apply {
+      text = label
+      textSize = textSizeValue
+      typeface = Typeface.DEFAULT_BOLD
+      setTextColor(Color.WHITE)
+      background = roundedBackground(Color.parseColor("#2AABEE"), 12f)
+      setPadding(8, 0, 8, 0)
+      setOnClickListener { onClick() }
+      setOnTouchListener { view, event ->
+        applyPressFeedback(view, event)
+        false
+      }
+      minHeight = 0
+      minimumHeight = 0
+      includeFontPadding = false
+      isAllCaps = false
+    }
+  }
+
   private fun createWhiteButton(
     label: String,
     textSizeValue: Float,
@@ -424,6 +482,7 @@ class FloatingWidgetService : Service() {
     private const val PREFS_NAME = "copybridge_floating_widget"
     private const val KEY_WIDGET_SIZE = "widget_size"
     private const val KEY_AUTO_SEND_ENABLED = "auto_send_enabled"
+    private const val KEY_REPLY_COPY_MODE = "reply_copy_mode"
     private const val KEY_WIDGET_X = "widget_x"
     private const val KEY_WIDGET_Y = "widget_y"
   }
