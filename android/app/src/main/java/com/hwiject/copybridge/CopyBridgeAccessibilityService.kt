@@ -4,7 +4,6 @@ import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -39,19 +38,21 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   }
 
   private fun handleCopyTelegramToAiRequest(copyMode: String) {
-    val root = rootInActiveWindow
+    val telegramRoots = getTelegramRoots()
 
-    if (root == null) {
-      Toast.makeText(this, "현재 화면 내용을 읽을 수 없습니다.", Toast.LENGTH_SHORT).show()
+    if (telegramRoots.isEmpty()) {
+      Toast.makeText(this, "Telegram 채팅방을 화면에 열어주세요.", Toast.LENGTH_SHORT).show()
       return
     }
 
     val rawTexts = mutableListOf<String>()
-    collectVisibleTexts(root, rawTexts)
+    telegramRoots.forEach { root ->
+      collectVisibleTexts(root, rawTexts)
+    }
 
     val cleanedTexts = cleanTextLines(rawTexts)
     if (cleanedTexts.isEmpty()) {
-      Toast.makeText(this, "복사할 텍스트를 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
+      Toast.makeText(this, "Telegram에서 복사할 텍스트를 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
       return
     }
 
@@ -73,21 +74,16 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   }
 
   private fun handlePasteAiToTelegramRequest(autoSend: Boolean) {
-    val roots = getCandidateRoots()
+    val telegramRoots = getTelegramRoots()
 
-    if (roots.isEmpty()) {
-      Toast.makeText(this, "현재 화면 정보를 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
+    if (telegramRoots.isEmpty()) {
+      Toast.makeText(this, "Telegram 채팅방을 화면에 열어주세요.", Toast.LENGTH_SHORT).show()
       return
     }
 
-    val editableNode = findEditableNodeFromRoots(roots)
+    val editableNode = findEditableNodeFromRoots(telegramRoots)
     if (editableNode == null) {
-      val packageNames = roots
-        .mapNotNull { it.packageName?.toString() }
-        .distinct()
-        .joinToString(", ")
-        .ifBlank { "unknown" }
-      Toast.makeText(this, "입력창을 찾지 못했습니다: $packageNames", Toast.LENGTH_SHORT).show()
+      Toast.makeText(this, "Telegram 입력창을 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
       return
     }
 
@@ -96,73 +92,62 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     if (clipboardText.isNotBlank()) {
       val setTextSuccess = setTextToNode(editableNode, clipboardText)
       if (setTextSuccess) {
-        if (autoSend) {
-          val sent = clickSendButton(getCandidateRoots())
-          if (sent) {
-            Toast.makeText(this, "AI → TG 붙여넣기 완료 (SET_TEXT + 전송)", Toast.LENGTH_SHORT).show()
-          } else {
-            Toast.makeText(this, "붙여넣기는 완료, 전송 버튼은 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
-          }
-        } else {
-          Toast.makeText(this, "AI → TG 붙여넣기 완료 (SET_TEXT)", Toast.LENGTH_SHORT).show()
-        }
+        handlePasteSuccess("SET_TEXT", autoSend, telegramRoots)
         return
       }
     }
 
     val pasteSuccess = pasteClipboardToNode(editableNode)
     if (pasteSuccess) {
-      if (autoSend) {
-        val sent = clickSendButton(getCandidateRoots())
-        if (sent) {
-          Toast.makeText(this, "AI → TG 붙여넣기 완료 (ACTION_PASTE + 전송)", Toast.LENGTH_SHORT).show()
-        } else {
-          Toast.makeText(this, "붙여넣기는 완료, 전송 버튼은 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
-        }
-      } else {
-        Toast.makeText(this, "AI → TG 붙여넣기 완료 (ACTION_PASTE)", Toast.LENGTH_SHORT).show()
-      }
+      val mode = if (clipboardText.isBlank()) "ACTION_PASTE" else "ACTION_PASTE fallback"
+      handlePasteSuccess(mode, autoSend, telegramRoots)
+      return
+    }
+
+    if (clipboardText.isBlank()) {
+      Toast.makeText(this, "클립보드 텍스트를 읽지 못했고, 시스템 붙여넣기도 실패했습니다.", Toast.LENGTH_SHORT).show()
     } else {
-      Toast.makeText(this, "붙여넣기 실패: 입력창을 찾았지만 텍스트 삽입에 실패했습니다.", Toast.LENGTH_SHORT).show()
+      Toast.makeText(this, "Telegram 입력창에 텍스트를 넣지 못했습니다.", Toast.LENGTH_SHORT).show()
     }
   }
 
-  private fun getCandidateRoots(): List<AccessibilityNodeInfo> {
-    val results = mutableListOf<AccessibilityNodeInfo>()
-    val tgPackage = "org.telegram"
-
-    val activeRoot = rootInActiveWindow
-    if (activeRoot != null) {
-      val pkg = activeRoot.packageName?.toString() ?: ""
-      if (pkg == tgPackage) {
-        results.add(activeRoot)
-        return results
-      }
-      results.add(activeRoot)
+  private fun handlePasteSuccess(mode: String, autoSend: Boolean, telegramRoots: List<AccessibilityNodeInfo>) {
+    if (!autoSend) {
+      Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode", Toast.LENGTH_SHORT).show()
+      return
     }
 
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-      val displays = windows ?: emptyList()
-      for (windowInfo in displays) {
-        val windowRoot = windowInfo.root ?: continue
-        val pkg = windowInfo.root?.packageName?.toString() ?: ""
-        if (pkg == tgPackage) {
-          results.add(0, windowRoot)
-          return results
-        }
-        results.add(windowRoot)
-      }
+    val sent = clickSendButton(telegramRoots)
+    if (sent) {
+      Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode + 전송", Toast.LENGTH_SHORT).show()
+    } else {
+      Toast.makeText(this, "붙여넣기는 완료, Telegram 전송 버튼은 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
     }
-
-    return results
   }
 
-  private fun findEditableNodeFromRoots(roots: List<AccessibilityNodeInfo>): AccessibilityNodeInfo? {
-    for (root in roots) {
-      val found = findEditableNode(root)
-      if (found != null) return found
+  private fun getTelegramRoots(): List<AccessibilityNodeInfo> {
+    val candidates = mutableListOf<AccessibilityNodeInfo>()
+
+    rootInActiveWindow?.let { root ->
+      if (isTelegramPackage(root.packageName?.toString().orEmpty())) {
+        candidates.add(root)
+      }
     }
-    return null
+
+    windows.forEach { window ->
+      val root = window.root
+      val packageName = root?.packageName?.toString().orEmpty()
+      if (root != null && isTelegramPackage(packageName) && candidates.none { it === root }) {
+        candidates.add(root)
+      }
+    }
+
+    return candidates
+  }
+
+  private fun isTelegramPackage(packageName: String): Boolean {
+    val lower = packageName.lowercase()
+    return lower.contains("telegram")
   }
 
   private fun collectVisibleTexts(node: AccessibilityNodeInfo?, output: MutableList<String>) {
@@ -204,6 +189,10 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     if (lower == "telegram") return true
     if (lower == "copybridge") return true
     if (lower == "bridge") return true
+    if (lower == "복사: 전체") return true
+    if (lower == "복사: 마지막") return true
+    if (lower == "전송: 켬") return true
+    if (lower == "전송: 끔") return true
     if (text.length > MAX_SINGLE_LINE_LENGTH) return true
 
     return false
@@ -238,31 +227,60 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       ?: ""
   }
 
-  private fun findEditableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-    if (node == null) return null
-
-    if (isEditableNode(node)) {
-      return node
-    }
-
-    for (index in 0 until node.childCount) {
-      val found = findEditableNode(node.getChild(index))
+  private fun findEditableNodeFromRoots(roots: List<AccessibilityNodeInfo>): AccessibilityNodeInfo? {
+    roots.forEach { root ->
+      val found = findEditableNode(root)
       if (found != null) return found
     }
 
     return null
   }
 
+  private fun findEditableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+    if (node == null) return null
+
+    val candidates = mutableListOf<AccessibilityNodeInfo>()
+    collectEditableNodes(node, candidates)
+
+    return candidates.firstOrNull { it.isFocused }
+      ?: candidates.firstOrNull { it.isAccessibilityFocused }
+      ?: candidates.lastOrNull()
+  }
+
+  private fun collectEditableNodes(
+    node: AccessibilityNodeInfo?,
+    output: MutableList<AccessibilityNodeInfo>
+  ) {
+    if (node == null) return
+
+    if (isEditableNode(node)) {
+      output.add(node)
+    }
+
+    for (index in 0 until node.childCount) {
+      collectEditableNodes(node.getChild(index), output)
+    }
+  }
+
   private fun isEditableNode(node: AccessibilityNodeInfo): Boolean {
+    if (!node.isEnabled) return false
+
     val className = node.className?.toString().orEmpty()
+    val hasSetTextAction = node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }
+    val hasPasteAction = node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_PASTE }
 
     if (node.isEditable) return true
     if (className.contains("EditText", ignoreCase = true)) return true
+    if (hasSetTextAction) return true
+    if (hasPasteAction) return true
 
     return false
   }
 
   private fun setTextToNode(node: AccessibilityNodeInfo, text: String): Boolean {
+    node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+
     val arguments = Bundle().apply {
       putCharSequence(
         AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
@@ -275,6 +293,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
   private fun pasteClipboardToNode(node: AccessibilityNodeInfo): Boolean {
     node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
     return node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
   }
 
@@ -285,27 +304,41 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         return sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
       }
     }
+
     return false
   }
 
   private fun findSendButton(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
     if (node == null) return null
-    if (isSendButton(node)) return node
+
+    if (isSendButton(node)) {
+      return node
+    }
+
     for (index in 0 until node.childCount) {
       val found = findSendButton(node.getChild(index))
       if (found != null) return found
     }
+
     return null
   }
 
   private fun isSendButton(node: AccessibilityNodeInfo): Boolean {
     if (!node.isEnabled) return false
+
     val textValue = node.text?.toString().orEmpty()
     val descriptionValue = node.contentDescription?.toString().orEmpty()
     val viewIdValue = node.viewIdResourceName.orEmpty()
+
     val combined = "$textValue $descriptionValue $viewIdValue".lowercase()
-    val looksLikeSend = combined.contains("send") || combined.contains("전송") || combined.contains("보내기")
+
+    val looksLikeSend =
+      combined.contains("send") ||
+      combined.contains("전송") ||
+      combined.contains("보내기")
+
     if (!looksLikeSend) return false
+
     return node.isClickable || node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK }
   }
 

@@ -28,7 +28,7 @@ class FloatingWidgetService : Service() {
   private var initialTouchX = 0f
   private var initialTouchY = 0f
 
-  private var widgetSize = WidgetSize.MEDIUM
+  private var widgetSize = WidgetSize.SMALL
   private var copyMode = CopyMode.ALL
   private var autoSendEnabled = false
 
@@ -39,13 +39,15 @@ class FloatingWidgetService : Service() {
     val panelPaddingBottom: Int,
     val contentWidth: Int,
     val buttonHeight: Int,
+    val toggleHeight: Int,
     val buttonTextSize: Float,
     val titleTextSize: Float,
     val headerButtonSize: Int
   ) {
-    SMALL("S", 14, 10, 12, 190, 56, 10f, 10f, 36),
-    MEDIUM("M", 18, 14, 16, 220, 64, 11f, 11f, 42),
-    LARGE("L", 22, 18, 20, 260, 74, 12f, 12f, 48)
+    SMALL("S", 18, 14, 16, 220, 64, 42, 11f, 11f, 42),
+    MEDIUM("M", 22, 18, 20, 260, 74, 46, 12f, 12f, 48),
+    LARGE("L", 24, 20, 22, 300, 84, 50, 13f, 13f, 52),
+    EXTRA_LARGE("XL", 26, 22, 24, 340, 94, 54, 14f, 14f, 56)
   }
 
   private enum class CopyMode(
@@ -144,14 +146,14 @@ class FloatingWidgetService : Service() {
   }
 
   private fun cycleWidgetSize() {
-    val currentParams = layoutParams
-    val currentX = currentParams?.x ?: 40
-    val currentY = currentParams?.y ?: 320
+    val currentX = layoutParams?.x ?: 40
+    val currentY = layoutParams?.y ?: 320
 
     widgetSize = when (widgetSize) {
       WidgetSize.SMALL -> WidgetSize.MEDIUM
       WidgetSize.MEDIUM -> WidgetSize.LARGE
-      WidgetSize.LARGE -> WidgetSize.SMALL
+      WidgetSize.LARGE -> WidgetSize.EXTRA_LARGE
+      WidgetSize.EXTRA_LARGE -> WidgetSize.SMALL
     }
 
     removeFloatingWidget()
@@ -164,27 +166,6 @@ class FloatingWidgetService : Service() {
     }
 
     Toast.makeText(this, "위젯 크기: ${widgetSize.label}", Toast.LENGTH_SHORT).show()
-  }
-
-  private fun toggleCopyMode(labelView: TextView) {
-    copyMode = when (copyMode) {
-      CopyMode.ALL -> CopyMode.LAST
-      CopyMode.LAST -> CopyMode.ALL
-    }
-
-    labelView.text = copyMode.label
-    Toast.makeText(this, copyMode.label, Toast.LENGTH_SHORT).show()
-  }
-
-  private fun toggleAutoSend(labelView: TextView) {
-    autoSendEnabled = !autoSendEnabled
-    labelView.text = if (autoSendEnabled) "전송: 켬" else "전송: 끔"
-
-    Toast.makeText(
-      this,
-      if (autoSendEnabled) "자동 전송: 켬" else "자동 전송: 끔",
-      Toast.LENGTH_SHORT
-    ).show()
   }
 
   private fun createWidgetView(): View {
@@ -243,22 +224,33 @@ class FloatingWidgetService : Service() {
       LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize)
     )
 
-    val copyModeButton = createToggleTextButton(copyMode.label, size.buttonTextSize) { view ->
-      toggleCopyMode(view)
+    val copyModeButton = createDarkButton(copyMode.label, size.buttonTextSize) {
+      copyMode = when (copyMode) {
+        CopyMode.ALL -> CopyMode.LAST
+        CopyMode.LAST -> CopyMode.ALL
+      }
+      refreshWidgetAtSamePosition()
+      Toast.makeText(this, copyMode.label, Toast.LENGTH_SHORT).show()
     }
 
-    val autoSendButton = createToggleTextButton(
+    val autoSendButton = createDarkButton(
       if (autoSendEnabled) "전송: 켬" else "전송: 끔",
       size.buttonTextSize
-    ) { view ->
-      toggleAutoSend(view)
+    ) {
+      autoSendEnabled = !autoSendEnabled
+      refreshWidgetAtSamePosition()
+      Toast.makeText(
+        this,
+        if (autoSendEnabled) "자동 전송: 켬" else "자동 전송: 끔",
+        Toast.LENGTH_SHORT
+      ).show()
     }
 
-    val copyButton = createWidgetButton("TG → AI 복사", size.buttonTextSize) {
+    val copyButton = createWhiteButton("TG → AI 복사", size.buttonTextSize) {
       CopyBridgeAccessibilityService.requestCopyTelegramToAi(this, copyMode.key)
     }
 
-    val pasteButton = createWidgetButton("AI → TG 붙여넣기", size.buttonTextSize) {
+    val pasteButton = createWhiteButton("AI → TG 붙여넣기", size.buttonTextSize) {
       CopyBridgeAccessibilityService.requestPasteAiToTelegram(this, autoSendEnabled)
     }
 
@@ -271,14 +263,14 @@ class FloatingWidgetService : Service() {
 
     panel.addView(
       copyModeButton,
-      LinearLayout.LayoutParams(size.contentWidth, 42).apply {
+      LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply {
         bottomMargin = 10
       }
     )
 
     panel.addView(
       autoSendButton,
-      LinearLayout.LayoutParams(size.contentWidth, 42).apply {
+      LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply {
         bottomMargin = 10
       }
     )
@@ -303,6 +295,20 @@ class FloatingWidgetService : Service() {
     return panel
   }
 
+  private fun refreshWidgetAtSamePosition() {
+    val currentX = layoutParams?.x ?: 40
+    val currentY = layoutParams?.y ?: 320
+
+    removeFloatingWidget()
+    showFloatingWidget()
+
+    layoutParams?.let { newParams ->
+      newParams.x = currentX
+      newParams.y = currentY
+      windowManager?.updateViewLayout(floatingView, newParams)
+    }
+  }
+
   private fun createHeaderButton(label: String, onClick: () -> Unit): TextView {
     return TextView(this).apply {
       text = label
@@ -319,27 +325,31 @@ class FloatingWidgetService : Service() {
     }
   }
 
-  private fun createToggleTextButton(
+  private fun createDarkButton(
     label: String,
     textSizeValue: Float,
-    onClick: (TextView) -> Unit
-  ): TextView {
-    return TextView(this).apply {
+    onClick: () -> Unit
+  ): Button {
+    return Button(this).apply {
       text = label
-      setTextColor(Color.WHITE)
       textSize = textSizeValue
       typeface = Typeface.DEFAULT_BOLD
-      gravity = Gravity.CENTER
+      setTextColor(Color.WHITE)
       background = roundedBackground(Color.parseColor("#333333"), 12f)
-      setOnClickListener { onClick(this) }
+      setPadding(8, 0, 8, 0)
+      setOnClickListener { onClick() }
       setOnTouchListener { view, event ->
         applyPressFeedback(view, event)
         false
       }
+      minHeight = 0
+      minimumHeight = 0
+      includeFontPadding = false
+      isAllCaps = false
     }
   }
 
-  private fun createWidgetButton(
+  private fun createWhiteButton(
     label: String,
     textSizeValue: Float,
     onClick: () -> Unit
@@ -359,6 +369,7 @@ class FloatingWidgetService : Service() {
       minHeight = 0
       minimumHeight = 0
       includeFontPadding = false
+      isAllCaps = false
     }
   }
 
