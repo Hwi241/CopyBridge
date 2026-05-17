@@ -1,13 +1,4 @@
-pa
- private enum class CopyMode(
- val key: String,
- val label: String
- ) {
- ALL("ALL", "복사: 전체"),
- LAST("LAST", "복사: 마지막")
- }
-
-ckage com.hwiject.copybridge
+package com.hwiject.copybridge
 
 import android.app.Service
 import android.content.Intent
@@ -36,6 +27,7 @@ class FloatingWidgetService : Service() {
   private var initialY = 0
   private var initialTouchX = 0f
   private var initialTouchY = 0f
+
   private var widgetSize = WidgetSize.MEDIUM
   private var copyMode = CopyMode.ALL
   private var autoSendEnabled = false
@@ -43,17 +35,25 @@ class FloatingWidgetService : Service() {
   private enum class WidgetSize(
     val label: String,
     val panelPaddingHorizontal: Int,
-    val panelPaddingVerticalTop: Int,
-    val panelPaddingVerticalBottom: Int,
+    val panelPaddingTop: Int,
+    val panelPaddingBottom: Int,
     val contentWidth: Int,
     val buttonHeight: Int,
     val buttonTextSize: Float,
     val titleTextSize: Float,
-    val closeButtonSize: Int
+    val headerButtonSize: Int
   ) {
     SMALL("S", 14, 10, 12, 190, 56, 10f, 10f, 36),
     MEDIUM("M", 18, 14, 16, 220, 64, 11f, 11f, 42),
     LARGE("L", 22, 18, 20, 260, 74, 12f, 12f, 48)
+  }
+
+  private enum class CopyMode(
+    val key: String,
+    val label: String
+  ) {
+    ALL("ALL", "복사: 전체"),
+    LAST("LAST", "복사: 마지막")
   }
 
   override fun onCreate() {
@@ -122,7 +122,7 @@ class FloatingWidgetService : Service() {
     try {
       windowManager?.addView(widgetView, params)
       Toast.makeText(this, "CopyBridge 위젯을 시작했습니다.", Toast.LENGTH_SHORT).show()
-    } catch (error: Exception) {
+    } catch (_: Exception) {
       floatingView = null
       layoutParams = null
       Toast.makeText(this, "위젯을 표시하지 못했습니다.", Toast.LENGTH_SHORT).show()
@@ -144,15 +144,15 @@ class FloatingWidgetService : Service() {
   }
 
   private fun cycleWidgetSize() {
+    val currentParams = layoutParams
+    val currentX = currentParams?.x ?: 40
+    val currentY = currentParams?.y ?: 320
+
     widgetSize = when (widgetSize) {
       WidgetSize.SMALL -> WidgetSize.MEDIUM
       WidgetSize.MEDIUM -> WidgetSize.LARGE
       WidgetSize.LARGE -> WidgetSize.SMALL
     }
-
-    val params = layoutParams ?: return
-    val currentX = params.x
-    val currentY = params.y
 
     removeFloatingWidget()
     showFloatingWidget()
@@ -166,6 +166,27 @@ class FloatingWidgetService : Service() {
     Toast.makeText(this, "위젯 크기: ${widgetSize.label}", Toast.LENGTH_SHORT).show()
   }
 
+  private fun toggleCopyMode(labelView: TextView) {
+    copyMode = when (copyMode) {
+      CopyMode.ALL -> CopyMode.LAST
+      CopyMode.LAST -> CopyMode.ALL
+    }
+
+    labelView.text = copyMode.label
+    Toast.makeText(this, copyMode.label, Toast.LENGTH_SHORT).show()
+  }
+
+  private fun toggleAutoSend(labelView: TextView) {
+    autoSendEnabled = !autoSendEnabled
+    labelView.text = if (autoSendEnabled) "전송: 켬" else "전송: 끔"
+
+    Toast.makeText(
+      this,
+      if (autoSendEnabled) "자동 전송: 켬" else "자동 전송: 끔",
+      Toast.LENGTH_SHORT
+    ).show()
+  }
+
   private fun createWidgetView(): View {
     val size = widgetSize
 
@@ -173,9 +194,9 @@ class FloatingWidgetService : Service() {
       orientation = LinearLayout.VERTICAL
       setPadding(
         size.panelPaddingHorizontal,
-        size.panelPaddingVerticalTop,
+        size.panelPaddingTop,
         size.panelPaddingHorizontal,
-        size.panelPaddingVerticalBottom
+        size.panelPaddingBottom
       )
       background = roundedBackground(Color.parseColor("#171717"), 18f)
       elevation = 12f
@@ -194,45 +215,15 @@ class FloatingWidgetService : Service() {
       gravity = Gravity.CENTER_VERTICAL
     }
 
-    val sizeButton = TextView(this).apply {
-      text = size.label
-      setTextColor(Color.WHITE)
-      textSize = 13f
-      typeface = Typeface.DEFAULT_BOLD
-      gravity = Gravity.CENTER
-      background = roundedBackground(Color.parseColor("#333333"), 12f)
-      setOnClickListener {
-        cycleWidgetSize()
-      }
-      setOnTouchListener { view, event ->
-        when (event.action) {
-          MotionEvent.ACTION_DOWN -> view.alpha = 0.55f
-          MotionEvent.ACTION_UP,
-          MotionEvent.ACTION_CANCEL -> view.alpha = 1f
-        }
-        false
-      }
+    val sizeButton = createHeaderButton(size.label) {
+      cycleWidgetSize()
     }
 
-    val closeButton = TextView(this).apply {
-      text = "×"
-      setTextColor(Color.WHITE)
+    val closeButton = createHeaderButton("×") {
+      Toast.makeText(this, "CopyBridge 위젯을 종료합니다.", Toast.LENGTH_SHORT).show()
+      stopSelf()
+    }.apply {
       textSize = 18f
-      typeface = Typeface.DEFAULT_BOLD
-      gravity = Gravity.CENTER
-      background = roundedBackground(Color.parseColor("#333333"), 12f)
-      setOnClickListener {
-        Toast.makeText(this@FloatingWidgetService, "CopyBridge 위젯을 종료합니다.", Toast.LENGTH_SHORT).show()
-        stopSelf()
-      }
-      setOnTouchListener { view, event ->
-        when (event.action) {
-          MotionEvent.ACTION_DOWN -> view.alpha = 0.55f
-          MotionEvent.ACTION_UP,
-          MotionEvent.ACTION_CANCEL -> view.alpha = 1f
-        }
-        false
-      }
     }
 
     header.addView(
@@ -242,47 +233,33 @@ class FloatingWidgetService : Service() {
 
     header.addView(
       sizeButton,
-      LinearLayout.LayoutParams(size.closeButtonSize, size.closeButtonSize).apply {
+      LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize).apply {
         rightMargin = 8
       }
     )
 
     header.addView(
       closeButton,
-      LinearLayout.LayoutParams(size.closeButtonSize, size.closeButtonSize)
+      LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize)
     )
 
-    val copyButton = createWidgetButton("TG → AI 복사") {
+    val copyModeButton = createToggleTextButton(copyMode.label, size.buttonTextSize) { view ->
+      toggleCopyMode(view)
+    }
+
+    val autoSendButton = createToggleTextButton(
+      if (autoSendEnabled) "전송: 켬" else "전송: 끔",
+      size.buttonTextSize
+    ) { view ->
+      toggleAutoSend(view)
+    }
+
+    val copyButton = createWidgetButton("TG → AI 복사", size.buttonTextSize) {
       CopyBridgeAccessibilityService.requestCopyTelegramToAi(this, copyMode.key)
     }
 
-    val pasteButton = createWidgetButton("AI → TG 붙여넣기") {
+    val pasteButton = createWidgetButton("AI → TG 붙여넣기", size.buttonTextSize) {
       CopyBridgeAccessibilityService.requestPasteAiToTelegram(this, autoSendEnabled)
-    }
-
-        val copyModeButton = TextView(this).apply {
-      text = copyMode.label
-      setTextColor(Color.WHITE)
-      textSize = size.buttonTextSize
-      typeface = Typeface.DEFAULT_BOLD
-      gravity = Gravity.CENTER
-      background = roundedBackground(Color.parseColor("#333333"), 12f)
-      setOnClickListener {
-        copyMode = when (copyMode) {
-          CopyMode.ALL -> CopyMode.LAST
-          CopyMode.LAST -> CopyMode.ALL
-        }
-        text = copyMode.label
-        Toast.makeText(this@FloatingWidgetService, copyMode.label, Toast.LENGTH_SHORT).show()
-      }
-      setOnTouchListener { view, event ->
-        when (event.action) {
-          MotionEvent.ACTION_DOWN -> view.alpha = 0.55f
-          MotionEvent.ACTION_UP,
-          MotionEvent.ACTION_CANCEL -> view.alpha = 1f
-        }
-        false
-      }
     }
 
     panel.addView(
@@ -298,32 +275,6 @@ class FloatingWidgetService : Service() {
         bottomMargin = 10
       }
     )
-
-    val autoSendButton = TextView(this).apply {
-      text = if (autoSendEnabled) "전송: 켬" else "전송: 끔"
-      setTextColor(Color.WHITE)
-      textSize = size.buttonTextSize
-      typeface = Typeface.DEFAULT_BOLD
-      gravity = Gravity.CENTER
-      background = roundedBackground(Color.parseColor("#333333"), 12f)
-      setOnClickListener {
-        autoSendEnabled = !autoSendEnabled
-        text = if (autoSendEnabled) "전송: 켬" else "전송: 끔"
-        Toast.makeText(
-          this@FloatingWidgetService,
-          if (autoSendEnabled) "자동 전송: 켬" else "자동 전송: 끔",
-          Toast.LENGTH_SHORT
-        ).show()
-      }
-      setOnTouchListener { view, event ->
-        when (event.action) {
-          MotionEvent.ACTION_DOWN -> view.alpha = 0.55f
-          MotionEvent.ACTION_UP,
-          MotionEvent.ACTION_CANCEL -> view.alpha = 1f
-        }
-        false
-      }
-    }
 
     panel.addView(
       autoSendButton,
@@ -352,30 +303,70 @@ class FloatingWidgetService : Service() {
     return panel
   }
 
-  private fun createWidgetButton(label: String, onClick: () -> Unit): Button {
+  private fun createHeaderButton(label: String, onClick: () -> Unit): TextView {
+    return TextView(this).apply {
+      text = label
+      setTextColor(Color.WHITE)
+      textSize = 13f
+      typeface = Typeface.DEFAULT_BOLD
+      gravity = Gravity.CENTER
+      background = roundedBackground(Color.parseColor("#333333"), 12f)
+      setOnClickListener { onClick() }
+      setOnTouchListener { view, event ->
+        applyPressFeedback(view, event)
+        false
+      }
+    }
+  }
+
+  private fun createToggleTextButton(
+    label: String,
+    textSizeValue: Float,
+    onClick: (TextView) -> Unit
+  ): TextView {
+    return TextView(this).apply {
+      text = label
+      setTextColor(Color.WHITE)
+      textSize = textSizeValue
+      typeface = Typeface.DEFAULT_BOLD
+      gravity = Gravity.CENTER
+      background = roundedBackground(Color.parseColor("#333333"), 12f)
+      setOnClickListener { onClick(this) }
+      setOnTouchListener { view, event ->
+        applyPressFeedback(view, event)
+        false
+      }
+    }
+  }
+
+  private fun createWidgetButton(
+    label: String,
+    textSizeValue: Float,
+    onClick: () -> Unit
+  ): Button {
     return Button(this).apply {
       text = label
-      textSize = size.buttonTextSize
+      textSize = textSizeValue
       typeface = Typeface.DEFAULT_BOLD
       setTextColor(Color.parseColor("#171717"))
       background = roundedBackground(Color.WHITE, 12f)
       setPadding(8, 0, 8, 0)
       setOnClickListener { onClick() }
       setOnTouchListener { view, event ->
-        when (event.action) {
-          MotionEvent.ACTION_DOWN -> {
-            view.alpha = 0.55f
-          }
-          MotionEvent.ACTION_UP,
-          MotionEvent.ACTION_CANCEL -> {
-            view.alpha = 1f
-          }
-        }
+        applyPressFeedback(view, event)
         false
       }
       minHeight = 0
       minimumHeight = 0
       includeFontPadding = false
+    }
+  }
+
+  private fun applyPressFeedback(view: View, event: MotionEvent) {
+    when (event.action) {
+      MotionEvent.ACTION_DOWN -> view.alpha = 0.55f
+      MotionEvent.ACTION_UP,
+      MotionEvent.ACTION_CANCEL -> view.alpha = 1f
     }
   }
 
