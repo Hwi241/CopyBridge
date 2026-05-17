@@ -132,11 +132,11 @@ class FloatingWidgetService : Service() {
     }
 
     val copyButton = createWidgetButton("TG → AI 복사") {
-      Toast.makeText(this, "텔레그램 대화 복사는 다음 단계에서 연결합니다.", Toast.LENGTH_SHORT).show()
+      CopyBridgeAccessibilityService.requestCopyTelegramToAi(this)
     }
 
     val pasteButton = createWidgetButton("AI → TG 붙여넣기") {
-      Toast.makeText(this, "AI 답변 붙여넣기는 다음 단계에서 연결합니다.", Toast.LENGTH_SHORT).show()
+      CopyBridgeAccessibilityService.requestPasteAiToTelegram(this)
     }
 
     panel.addView(
