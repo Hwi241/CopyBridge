@@ -38,7 +38,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     super.onDestroy()
   }
 
-  private fun handleCopyTelegramToAiRequest(copyMode: String) {
+  private fun handleCopyTelegramToAiRequest() {
     val telegramRoots = getTelegramRoots()
 
     if (telegramRoots.isEmpty()) {
@@ -46,26 +46,20 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       return
     }
 
-    val candidates = collectTelegramTextCandidates(telegramRoots)
+    val candidates = collectTelegramMessageCandidates(telegramRoots)
 
     if (candidates.isEmpty()) {
       Toast.makeText(this, "Telegram 메시지를 찾지 못했습니다.", Toast.LENGTH_SHORT).show()
       return
     }
 
-    val selectedTexts = if (copyMode == COPY_MODE_LAST) {
-      candidates.takeLast(1).map { it.text }
-    } else {
-      candidates.map { it.text }
-    }
-
+    val selectedTexts = candidates.map { it.text }
     val result = buildCopyText(selectedTexts)
     copyToClipboard(result)
 
-    val modeLabel = if (copyMode == COPY_MODE_LAST) "마지막" else "전체"
     Toast.makeText(
       this,
-      "TG → AI 복사 완료($modeLabel): ${selectedTexts.size}개",
+      "텔레그램 답변복사 완료: ${selectedTexts.size}개",
       Toast.LENGTH_SHORT
     ).show()
   }
@@ -159,13 +153,17 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val right: Int
   )
 
-  private fun collectTelegramTextCandidates(
+  private fun collectTelegramMessageCandidates(
     roots: List<AccessibilityNodeInfo>
   ): List<TextCandidate> {
     val rawCandidates = mutableListOf<TextCandidate>()
 
     roots.forEach { root ->
-      collectVisibleTextCandidates(root, rawCandidates)
+      val rootRect = Rect()
+      root.getBoundsInScreen(rootRect)
+      if (!rootRect.isEmpty()) {
+        collectVisibleMessageTextCandidates(root, rootRect, rawCandidates)
+      }
     }
 
     val sorted = rawCandidates
@@ -189,8 +187,9 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     return result.takeLast(MAX_COPY_LINES)
   }
 
-  private fun collectVisibleTextCandidates(
+  private fun collectVisibleMessageTextCandidates(
     node: AccessibilityNodeInfo?,
+    rootRect: Rect,
     output: MutableList<TextCandidate>
   ) {
     if (node == null) return
@@ -198,33 +197,33 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val rect = Rect()
     node.getBoundsInScreen(rect)
 
-    if (!rect.isEmpty()) {
+    if (!rect.isEmpty() && isInsideMessageArea(rect, rootRect)) {
       val textValue = node.text?.toString()?.trim()
-      val descriptionValue = node.contentDescription?.toString()?.trim()
-      addTextCandidateIfPossible(textValue, rect, output)
-      addTextCandidateIfPossible(descriptionValue, rect, output)
+      if (!textValue.isNullOrBlank()) {
+        output.add(
+          TextCandidate(
+            text = textValue,
+            top = rect.top,
+            bottom = rect.bottom,
+            left = rect.left,
+            right = rect.right
+          )
+        )
+      }
     }
 
     for (index in 0 until node.childCount) {
-      collectVisibleTextCandidates(node.getChild(index), output)
+      collectVisibleMessageTextCandidates(node.getChild(index), rootRect, output)
     }
   }
 
-  private fun addTextCandidateIfPossible(
-    value: String?,
-    rect: Rect,
-    output: MutableList<TextCandidate>
-  ) {
-    if (value.isNullOrBlank()) return
-    output.add(
-      TextCandidate(
-        text = value,
-        top = rect.top,
-        bottom = rect.bottom,
-        left = rect.left,
-        right = rect.right
-      )
-    )
+  private fun isInsideMessageArea(rect: Rect, rootRect: Rect): Boolean {
+    val rootHeight = rootRect.height()
+    if (rootHeight <= 0) return false
+    val centerY = (rect.top + rect.bottom) / 2
+    val topLimit = rootRect.top + (rootHeight * 0.18f).toInt()
+    val bottomLimit = rootRect.bottom - (rootHeight * 0.22f).toInt()
+    return centerY in topLimit..bottomLimit
   }
 
   private fun normalizeCandidateText(raw: String): String {
@@ -382,22 +381,17 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     private const val MAX_COPY_LINES = 80
     private const val MAX_COPY_CHARS = 8000
     private const val MAX_SINGLE_LINE_LENGTH = 600
-    private const val COPY_MODE_ALL = "ALL"
-    private const val COPY_MODE_LAST = "LAST"
     private var activeService: CopyBridgeAccessibilityService? = null
 
     fun isServiceActive(): Boolean = activeService != null
 
-    fun requestCopyTelegramToAi(context: Context): Boolean =
-      requestCopyTelegramToAi(context, COPY_MODE_ALL)
-
-    fun requestCopyTelegramToAi(context: Context, copyMode: String): Boolean {
+    fun requestCopyTelegramToAi(context: Context): Boolean {
       val service = activeService
       if (service == null) {
         Toast.makeText(context, "CopyBridge 접근성 권한을 먼저 켜주세요.", Toast.LENGTH_SHORT).show()
         return false
       }
-      service.handleCopyTelegramToAiRequest(copyMode)
+      service.handleCopyTelegramToAiRequest()
       return true
     }
 

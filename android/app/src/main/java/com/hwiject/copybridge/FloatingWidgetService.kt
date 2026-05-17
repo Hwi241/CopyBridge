@@ -29,7 +29,6 @@ class FloatingWidgetService : Service() {
   private var initialTouchY = 0f
 
   private var widgetSize = WidgetSize.SMALL
-  private var copyMode = CopyMode.ALL
   private var autoSendEnabled = false
 
   private enum class WidgetSize(
@@ -48,14 +47,6 @@ class FloatingWidgetService : Service() {
     MEDIUM("M", 24, 20, 22, 300, 84, 50, 13f, 13f, 52),
     LARGE("L", 26, 22, 24, 340, 94, 54, 14f, 14f, 56),
     EXTRA_LARGE("XL", 28, 24, 26, 380, 104, 58, 15f, 15f, 60)
-  }
-
-  private enum class CopyMode(
-    val key: String,
-    val label: String
-  ) {
-    ALL("ALL", "복사: 전체"),
-    LAST("LAST", "복사: 마지막")
   }
 
   override fun onCreate() {
@@ -224,15 +215,6 @@ class FloatingWidgetService : Service() {
       LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize)
     )
 
-    val copyModeButton = createDarkButton(copyMode.label, size.buttonTextSize) {
-      copyMode = when (copyMode) {
-        CopyMode.ALL -> CopyMode.LAST
-        CopyMode.LAST -> CopyMode.ALL
-      }
-      refreshWidgetAtSamePosition()
-      Toast.makeText(this, copyMode.label, Toast.LENGTH_SHORT).show()
-    }
-
     val autoSendButton = createDarkButton(
       if (autoSendEnabled) "전송: 켬" else "전송: 끔",
       size.buttonTextSize
@@ -247,7 +229,7 @@ class FloatingWidgetService : Service() {
     }
 
     val copyButton = createWhiteButton("텔레그램 답변복사", size.buttonTextSize) {
-      CopyBridgeAccessibilityService.requestCopyTelegramToAi(this, copyMode.key)
+      CopyBridgeAccessibilityService.requestCopyTelegramToAi(this)
     }
 
     val pasteButton = createWhiteButton("텔레그램으로 전송", size.buttonTextSize) {
@@ -264,13 +246,6 @@ class FloatingWidgetService : Service() {
     panel.addView(
       copyButton,
       LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply {
-        bottomMargin = 10
-      }
-    )
-
-    panel.addView(
-      copyModeButton,
-      LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply {
         bottomMargin = 10
       }
     )
