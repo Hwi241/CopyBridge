@@ -33,6 +33,8 @@ class FloatingWidgetService : Service() {
   private var widgetSize = WidgetSize.SMALL
   private var autoSendEnabled = false
   private var replyCopyModeString: String = "FULL"
+  private var gptOutputModeString: String = "CODE"
+  private var isCollapsed = false
 
   private enum class WidgetSize(
     val label: String,
@@ -85,6 +87,8 @@ class FloatingWidgetService : Service() {
     widgetSize = WidgetSize.entries.firstOrNull { it.label == savedSizeLabel } ?: WidgetSize.SMALL
     autoSendEnabled = prefs.getBoolean(KEY_AUTO_SEND_ENABLED, false)
     replyCopyModeString = prefs.getString(KEY_REPLY_COPY_MODE, "FULL") ?: "FULL"
+    gptOutputModeString = prefs.getString(KEY_GPT_OUTPUT_MODE, "CODE") ?: "CODE"
+    isCollapsed = prefs.getBoolean(KEY_WIDGET_COLLAPSED, false)
   }
 
   private fun saveWidgetPreferences() {
@@ -93,6 +97,8 @@ class FloatingWidgetService : Service() {
       .putString(KEY_WIDGET_SIZE, widgetSize.label)
       .putBoolean(KEY_AUTO_SEND_ENABLED, autoSendEnabled)
       .putString(KEY_REPLY_COPY_MODE, replyCopyModeString)
+      .putString(KEY_GPT_OUTPUT_MODE, gptOutputModeString)
+      .putBoolean(KEY_WIDGET_COLLAPSED, isCollapsed)
       .apply()
   }
 
@@ -201,14 +207,11 @@ class FloatingWidgetService : Service() {
   private fun createWidgetView(): View {
     val size = widgetSize
 
+    if (isCollapsed) return createCollapsedView()
+
     val panel = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
-      setPadding(
-        size.panelPaddingHorizontal,
-        size.panelPaddingTop,
-        size.panelPaddingHorizontal,
-        size.panelPaddingBottom
-      )
+      setPadding(size.panelPaddingHorizontal, size.panelPaddingTop, size.panelPaddingHorizontal, size.panelPaddingBottom)
       background = roundedBackground(Color.parseColor("#171717"), 18f)
       elevation = 12f
     }
@@ -218,127 +221,76 @@ class FloatingWidgetService : Service() {
       gravity = Gravity.CENTER_VERTICAL
     }
 
+    val collapseButton = createHeaderButton("−") {
+      isCollapsed = true; saveWidgetPreferences(); refreshWidgetAtSamePosition()
+    }
+
     val title = TextView(this).apply {
-      text = "Bridge"
-      setTextColor(Color.WHITE)
-      textSize = size.titleTextSize
-      typeface = Typeface.DEFAULT_BOLD
-      gravity = Gravity.CENTER_VERTICAL
+      text = "Bridge"; setTextColor(Color.WHITE); textSize = size.titleTextSize
+      typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER_VERTICAL
     }
 
-    val sizeButton = createHeaderButton(size.label) {
-      cycleWidgetSize()
-    }
-
+    val sizeButton = createHeaderButton(size.label) { cycleWidgetSize() }
     val closeButton = createHeaderButton("×") {
-      Toast.makeText(this, "CopyBridge 위젯을 종료합니다.", Toast.LENGTH_SHORT).show()
-      stopSelf()
-    }.apply {
-      textSize = 18f
-    }
+      Toast.makeText(this, "CopyBridge 위젯을 종료합니다.", Toast.LENGTH_SHORT).show(); stopSelf()
+    }.apply { textSize = 18f }
 
-    header.addView(
-      title,
-      LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-    )
-
-    header.addView(
-      sizeButton,
-      LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize).apply {
-        rightMargin = 8
-      }
-    )
-
-    header.addView(
-      closeButton,
-      LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize)
-    )
+    header.addView(collapseButton, LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize).apply { rightMargin = 8 })
+    header.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+    header.addView(sizeButton, LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize).apply { rightMargin = 8 })
+    header.addView(closeButton, LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize))
 
     val replyCopyLabel = if (replyCopyModeString == "LAST") "답변: 마지막" else "답변: 전체"
     val replyCopyButton = createDarkButton(replyCopyLabel, size.buttonTextSize) {
       replyCopyModeString = if (replyCopyModeString == "LAST") "FULL" else "LAST"
-      saveWidgetPreferences()
-      refreshWidgetAtSamePosition()
+      saveWidgetPreferences(); refreshWidgetAtSamePosition()
     }
 
-    val autoSendButton = createDarkButton(
-      if (autoSendEnabled) "전송: 켬" else "전송: 끔",
-      size.buttonTextSize
-    ) {
-      autoSendEnabled = !autoSendEnabled
-      saveWidgetPreferences()
-      refreshWidgetAtSamePosition()
+    val gptOutputLabel = if (gptOutputModeString == "FULL") "GPT: 전체" else "GPT: 코드"
+    val gptOutputButton = createDarkButton(gptOutputLabel, size.buttonTextSize) {
+      gptOutputModeString = if (gptOutputModeString == "FULL") "CODE" else "FULL"
+      saveWidgetPreferences(); refreshWidgetAtSamePosition()
     }
 
-    val copyButton = createWhiteButton("텔레그램 답변복사", size.buttonTextSize) {
-      CopyBridgeAccessibilityService.requestCopyTelegramToAi(this)
+    val autoSendLabel = if (autoSendEnabled) "전송: 켬" else "전송: 끔"
+    val autoSendButton = createDarkButton(autoSendLabel, size.buttonTextSize) {
+      autoSendEnabled = !autoSendEnabled; saveWidgetPreferences(); refreshWidgetAtSamePosition()
     }
 
-    val gptButton = createDarkButton("GPT로 보내기", size.buttonTextSize) {
-      CopyBridgeAccessibilityService.requestTelegramToGpt(this, replyCopyModeString)
+    val gptButton = createWhiteButton("GPT로 보내기", size.buttonTextSize) {
+      CopyBridgeAccessibilityService.requestTelegramToGpt(this, replyCopyModeString, autoSendEnabled)
     }
 
-    val gptCodeButton = createDarkButton("GPT 코드 전송", size.buttonTextSize) {
-      CopyBridgeAccessibilityService.requestGptCodeToTelegram(this, autoSendEnabled)
+    val tgButton = createTelegramBlueButton("텔레그램으로 보내기", size.buttonTextSize) {
+      CopyBridgeAccessibilityService.requestGptToTelegram(this, gptOutputModeString, autoSendEnabled)
     }
 
-    val pasteButton = createTelegramBlueButton("텔레그램으로 전송", size.buttonTextSize) {
-      CopyBridgeAccessibilityService.requestPasteAiToTelegram(this, autoSendEnabled)
-    }
+    panel.addView(header, LinearLayout.LayoutParams(size.contentWidth, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 10 })
+    panel.addView(gptButton, LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply { bottomMargin = 10 })
+    panel.addView(replyCopyButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply { bottomMargin = 10 })
+    panel.addView(tgButton, LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply { bottomMargin = 10 })
+    panel.addView(gptOutputButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply { bottomMargin = 10 })
+    panel.addView(autoSendButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight))
 
-    panel.addView(
-      header,
-      LinearLayout.LayoutParams(size.contentWidth, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-        bottomMargin = 10
-      }
-    )
-
-    panel.addView(
-      copyButton,
-      LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply {
-        bottomMargin = 10
-      }
-    )
-
-    panel.addView(
-      replyCopyButton,
-      LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply {
-        bottomMargin = 10
-      }
-    )
-
-    panel.addView(
-      gptButton,
-      LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply {
-        bottomMargin = 10
-      }
-    )
-
-    panel.addView(
-      gptCodeButton,
-      LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply {
-        bottomMargin = 10
-      }
-    )
-
-    panel.addView(
-      pasteButton,
-      LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply {
-        bottomMargin = 10
-      }
-    )
-
-    panel.addView(
-      autoSendButton,
-      LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight)
-    )
-
-    panel.setOnTouchListener { _, event ->
-      handleDrag(event)
-      true
-    }
-
+    panel.setOnTouchListener { _, event -> handleDrag(event); true }
     return panel
+  }
+
+  private fun createCollapsedView(): View {
+    return TextView(this).apply {
+      text = "B"
+      setTextColor(Color.WHITE)
+      textSize = 20f
+      typeface = Typeface.DEFAULT_BOLD
+      gravity = Gravity.CENTER
+      background = roundedBackground(Color.parseColor("#171717"), 48f)
+      setPadding(24, 24, 24, 24)
+      elevation = 12f
+      setOnClickListener {
+        isCollapsed = false; saveWidgetPreferences(); refreshWidgetAtSamePosition()
+      }
+      setOnTouchListener { _, event -> handleDrag(event); true }
+    }
   }
 
   private fun refreshWidgetAtSamePosition() {
@@ -483,6 +435,8 @@ class FloatingWidgetService : Service() {
     private const val KEY_WIDGET_SIZE = "widget_size"
     private const val KEY_AUTO_SEND_ENABLED = "auto_send_enabled"
     private const val KEY_REPLY_COPY_MODE = "reply_copy_mode"
+    private const val KEY_GPT_OUTPUT_MODE = "gpt_output_mode"
+    private const val KEY_WIDGET_COLLAPSED = "widget_collapsed"
     private const val KEY_WIDGET_X = "widget_x"
     private const val KEY_WIDGET_Y = "widget_y"
   }
