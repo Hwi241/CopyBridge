@@ -2,6 +2,7 @@ package com.hwiject.copybridge
 
 import android.app.Service
 import android.content.Intent
+import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -22,6 +23,7 @@ class FloatingWidgetService : Service() {
   private var windowManager: WindowManager? = null
   private var floatingView: View? = null
   private var layoutParams: WindowManager.LayoutParams? = null
+  private var preferences: SharedPreferences? = null
 
   private var initialX = 0
   private var initialY = 0
@@ -52,6 +54,8 @@ class FloatingWidgetService : Service() {
   override fun onCreate() {
     super.onCreate()
     windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+    preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+    loadWidgetPreferences()
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -72,6 +76,37 @@ class FloatingWidgetService : Service() {
   override fun onDestroy() {
     removeFloatingWidget()
     super.onDestroy()
+  }
+
+  private fun loadWidgetPreferences() {
+    val prefs = preferences ?: return
+    val savedSizeLabel = prefs.getString(KEY_WIDGET_SIZE, WidgetSize.SMALL.label)
+    widgetSize = WidgetSize.entries.firstOrNull { it.label == savedSizeLabel } ?: WidgetSize.SMALL
+    autoSendEnabled = prefs.getBoolean(KEY_AUTO_SEND_ENABLED, false)
+  }
+
+  private fun saveWidgetPreferences() {
+    val prefs = preferences ?: return
+    prefs.edit()
+      .putString(KEY_WIDGET_SIZE, widgetSize.label)
+      .putBoolean(KEY_AUTO_SEND_ENABLED, autoSendEnabled)
+      .apply()
+  }
+
+  private fun getSavedWidgetX(): Int {
+    return preferences?.getInt(KEY_WIDGET_X, 40) ?: 40
+  }
+
+  private fun getSavedWidgetY(): Int {
+    return preferences?.getInt(KEY_WIDGET_Y, 320) ?: 320
+  }
+
+  private fun saveWidgetPosition(x: Int, y: Int) {
+    val prefs = preferences ?: return
+    prefs.edit()
+      .putInt(KEY_WIDGET_X, x)
+      .putInt(KEY_WIDGET_Y, y)
+      .apply()
   }
 
   private fun canDrawOverlay(): Boolean {
@@ -105,8 +140,8 @@ class FloatingWidgetService : Service() {
       PixelFormat.TRANSLUCENT
     ).apply {
       gravity = Gravity.TOP or Gravity.START
-      x = 40
-      y = 320
+      x = getSavedWidgetX()
+      y = getSavedWidgetY()
     }
 
     layoutParams = params
@@ -156,6 +191,7 @@ class FloatingWidgetService : Service() {
       windowManager?.updateViewLayout(floatingView, newParams)
     }
 
+    saveWidgetPreferences()
     Toast.makeText(this, "위젯 크기: ${widgetSize.label}", Toast.LENGTH_SHORT).show()
   }
 
@@ -220,6 +256,7 @@ class FloatingWidgetService : Service() {
       size.buttonTextSize
     ) {
       autoSendEnabled = !autoSendEnabled
+      saveWidgetPreferences()
       refreshWidgetAtSamePosition()
       Toast.makeText(
         this,
@@ -371,6 +408,7 @@ class FloatingWidgetService : Service() {
         params.x = initialX + (event.rawX - initialTouchX).toInt()
         params.y = initialY + (event.rawY - initialTouchY).toInt()
         windowManager?.updateViewLayout(floatingView, params)
+        saveWidgetPosition(params.x, params.y)
       }
     }
   }
@@ -380,5 +418,13 @@ class FloatingWidgetService : Service() {
       setColor(color)
       cornerRadius = radius
     }
+  }
+
+  private companion object {
+    private const val PREFS_NAME = "copybridge_floating_widget"
+    private const val KEY_WIDGET_SIZE = "widget_size"
+    private const val KEY_AUTO_SEND_ENABLED = "auto_send_enabled"
+    private const val KEY_WIDGET_X = "widget_x"
+    private const val KEY_WIDGET_Y = "widget_y"
   }
 }

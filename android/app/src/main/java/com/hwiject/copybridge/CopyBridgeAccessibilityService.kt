@@ -263,7 +263,6 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     )
     if (partialIgnores.any { lower.contains(it) }) return true
 
-    if (text.length > MAX_SINGLE_LINE_LENGTH) return true
     if (text.length <= 1) return true
 
     return false
