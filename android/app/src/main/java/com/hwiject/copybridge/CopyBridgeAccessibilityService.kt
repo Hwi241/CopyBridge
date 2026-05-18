@@ -622,20 +622,32 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
   private fun isAiSendButton(node: AccessibilityNodeInfo): Boolean {
     if (!node.isEnabled) return false
+
     val text = node.text?.toString()?.trim().orEmpty()
     val desc = node.contentDescription?.toString()?.trim().orEmpty()
     val viewId = node.viewIdResourceName.orEmpty()
+
     val lowerText = text.lowercase()
     val lowerDesc = desc.lowercase()
     val lowerViewId = viewId.lowercase()
-    val descLooksLike = lowerDesc.contains("send") || lowerDesc.contains("submit") ||
-      lowerDesc.contains("전송") || lowerDesc.contains("보내기") || lowerDesc.contains("메시지 보내기")
-    val viewIdLooksLike = lowerViewId.contains("send") || lowerViewId.contains("submit")
-    val textExact = lowerText == "send" || lowerText == "submit" ||
-      lowerText == "전송" || lowerText == "보내기"
+
+    val descLooksLike = lowerDesc.contains("send") ||
+      lowerDesc.contains("submit") ||
+      lowerDesc.contains("전송") ||
+      lowerDesc.contains("보내기") ||
+      lowerDesc.contains("메시지 보내기")
+
+    val viewIdLooksLike = lowerViewId.contains("send") ||
+      lowerViewId.contains("submit")
+
+    val textExact = lowerText == "send" ||
+      lowerText == "submit" ||
+      lowerText == "전송" ||
+      lowerText == "보내기"
+
     val looksLikeSend = descLooksLike || viewIdLooksLike || textExact
-    if (!looksLikeSend) return false
-    return node.isClickable || node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK }
+
+    return looksLikeSend
   }
 
   private fun buildAiWindowDebugInfo(reason: String, roots: List<AccessibilityNodeInfo>): String {
@@ -710,6 +722,37 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       "복사", "코드 복사", "plain text", "thinking"
     )
     return ignores.any { lower.contains(it) }
+  }
+
+
+  private fun cleanAiOutputTexts(rawTexts: List<String>): List<String> {
+    val result = mutableListOf<String>()
+    rawTexts.forEach { rawText ->
+      val cleaned = rawText.trim()
+      if (cleaned.isBlank()) return@forEach
+      if (cleaned.length <= 1) return@forEach
+      if (shouldIgnoreAiText(cleaned)) return@forEach
+      addUniqueAiOutputText(result, cleaned)
+    }
+    return result
+  }
+
+  private fun addUniqueAiOutputText(output: MutableList<String>, text: String) {
+    val normalized = text.replace(Regex("\\s+"), " ").trim()
+    if (normalized.isBlank()) return
+    val iterator = output.listIterator()
+    while (iterator.hasNext()) {
+      val existing = iterator.next()
+      val existingNormalized = existing.replace(Regex("\\s+"), " ").trim()
+      if (existingNormalized == normalized) return
+      if (existingNormalized.contains(normalized) && existingNormalized.length >= normalized.length) return
+      if (normalized.contains(existingNormalized) && normalized.length > existingNormalized.length) iterator.remove()
+    }
+    output.add(text)
+  }
+
+  private fun clampCopyText(text: String): String {
+    return if (text.length > MAX_COPY_CHARS) text.take(MAX_COPY_CHARS) else text
   }
 
   companion object {
@@ -795,33 +838,58 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         return true
       }
 
-      if (service.setTextToNode(aiEdit, textToSend)) {
-        if (autoSend) {
-          Handler(Looper.getMainLooper()).postDelayed({
-            val freshRoots = service.getAiRoots()
-            var sent = service.clickAiSendButton(freshRoots)
-            if (!sent) {
-              aiEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-              aiEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-              Handler(Looper.getMainLooper()).postDelayed({
-                val retryRoots = service.getAiRoots()
-                val retry = service.clickAiSendButton(retryRoots)
-                if (!retry) {
-                  val debug = service.buildAiWindowDebugInfo("GPT 전송 버튼 찾기 실패", retryRoots)
-                  service.copyToClipboard(debug)
-                  Toast.makeText(context, "GPT 전송 버튼을 찾지 못했습니다. 진단 정보가 복사되었습니다.", Toast.LENGTH_SHORT).show()
-                }
-              }, 200L)
-            }
-          }, 700L)
-        } else {
-          Toast.makeText(context, "GPT 입력창에 넣었습니다.", Toast.LENGTH_SHORT).show()
-        }
+      val setTextOk = service.setTextToNode(aiEdit, textToSend)
+      val inputOk = if (setTextOk) {
+        true
       } else {
+        service.copyToClipboard(textToSend)
+        service.pasteClipboardToNode(aiEdit)
+      }
+
+      val modeLabel = if (copyMode == COPY_MODE_LAST) "마지막" else "전체"
+
+      if (!autoSend) {
+        val msg = if (inputOk) {
+          "GPT 입력창에 넣었습니다($modeLabel: ${selectedTexts.size}개)."
+        } else {
+          "${selectedTexts.size}개 텍스트를 클립보드에 복사했습니다."
+        }
+        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+        return true
+      }
+
+      if (!inputOk) {
         val debug = service.buildAiWindowDebugInfo("GPT 텍스트 입력 실패", aiRoots)
         service.copyToClipboard(debug)
         Toast.makeText(context, "GPT 입력에 실패했습니다. 진단 정보가 복사되었습니다.", Toast.LENGTH_SHORT).show()
+        return true
       }
+
+      Handler(Looper.getMainLooper()).postDelayed({
+        val freshRoots = service.getAiRoots()
+        val firstSent = service.clickAiSendButton(freshRoots)
+
+        if (firstSent) {
+          Toast.makeText(context, "GPT로 전송했습니다.", Toast.LENGTH_SHORT).show()
+          return@postDelayed
+        }
+
+        aiEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        aiEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        performImeEnterIfPossible(aiEdit)
+        Handler(Looper.getMainLooper()).postDelayed({
+          val retryRoots = service.getAiRoots()
+          val retrySent = service.clickAiSendButton(retryRoots)
+
+          if (retrySent) {
+            Toast.makeText(context, "GPT로 전송했습니다.", Toast.LENGTH_SHORT).show()
+          } else {
+            val debug = service.buildAiWindowDebugInfo("GPT 전송 버튼 찾기 실패", retryRoots)
+            service.copyToClipboard(debug)
+            Toast.makeText(context, "GPT 전송 버튼을 찾지 못했습니다. 진단 정보가 복사되었습니다.", Toast.LENGTH_SHORT).show()
+          }
+        }, 500L)
+      }, 1200L)
       return true
     }
 
@@ -838,42 +906,27 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         return false
       }
 
-      var textToSend = ""
+            var textToSend = ""
+
+      val rawTexts = mutableListOf<String>()
+      aiRoots.forEach { root -> service.collectAllTexts(root, rawTexts) }
+      val cleanedTexts = service.cleanAiOutputTexts(rawTexts)
 
       if (gptOutputMode == "CODE") {
-        val rawTexts = mutableListOf<String>()
-        aiRoots.forEach { root -> service.collectAllTexts(root, rawTexts) }
-        val codeBlocks = service.extractCodeBlocks(rawTexts)
-        textToSend = if (codeBlocks.isNotEmpty()) {
-          codeBlocks.joinToString("\n\n")
+        val codeBlocks = service.extractCodeBlocks(cleanedTexts)
+        val codeCandidates = cleanedTexts.filter { service.looksLikeCode(it) }
+
+        val selectedCode = if (codeBlocks.isNotEmpty()) {
+          codeBlocks.last().trim()
         } else {
-          rawTexts.filter { service.looksLikeCode(it) }.takeLast(3).joinToString("\n")
+          codeCandidates.maxByOrNull { it.length }?.trim().orEmpty()
         }
+
+        textToSend = service.clampCopyText(selectedCode)
       } else {
-        val rawTexts = mutableListOf<String>()
-        aiRoots.forEach { root -> service.collectAiAnswerTexts(root, rawTexts) }
-
-        val cleanedTexts = mutableListOf<String>()
-        var previousText = ""
-
-        rawTexts.forEach { rawText ->
-          val cleaned = rawText.trim()
-          if (cleaned.isBlank()) return@forEach
-          if (cleaned == previousText) return@forEach
-
-          cleanedTexts.add(cleaned)
-          previousText = cleaned
-        }
-
         val fullText = cleanedTexts.joinToString("\n")
-        textToSend = if (fullText.length > MAX_COPY_CHARS) {
-          fullText.take(MAX_COPY_CHARS)
-        } else {
-          fullText
-        }
-      }
-
-      if (textToSend.isBlank()) {
+        textToSend = service.clampCopyText(fullText)
+      }if (textToSend.isBlank()) {
         val debug = service.buildAiWindowDebugInfo("GPT 텍스트를 찾지 못함 (mode=$gptOutputMode)", aiRoots)
         service.copyToClipboard(debug)
         Toast.makeText(context, "GPT 텍스트를 찾지 못했습니다. 진단 정보가 복사되었습니다.", Toast.LENGTH_SHORT).show()
