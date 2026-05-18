@@ -278,7 +278,7 @@ class FloatingWidgetService : Service() {
     return panel
   }
 
-  private fun createCollapsedView(): View {
+    private fun createCollapsedView(): View {
     return TextView(this).apply {
       text = "B"
       setTextColor(Color.WHITE)
@@ -288,6 +288,15 @@ class FloatingWidgetService : Service() {
       background = roundedBackground(Color.parseColor("#171717"), 48f)
       setPadding(24, 24, 24, 24)
       elevation = 12f
+
+      setOnClickListener {
+        isCollapsed = false
+        saveWidgetPreferences()
+        Handler(Looper.getMainLooper()).post {
+          refreshWidgetAtSamePosition()
+        }
+      }
+
       setOnTouchListener { view, event ->
         val params = this@FloatingWidgetService.layoutParams ?: return@setOnTouchListener true
 
@@ -322,11 +331,7 @@ class FloatingWidgetService : Service() {
             val isTap = dx >= -COLLAPSED_TAP_SLOP && dx <= COLLAPSED_TAP_SLOP &&
               dy >= -COLLAPSED_TAP_SLOP && dy <= COLLAPSED_TAP_SLOP
             if (isTap) {
-              Handler(Looper.getMainLooper()).post {
-                isCollapsed = false
-                saveWidgetPreferences()
-                refreshWidgetAtSamePosition()
-              }
+              view.performClick()
             }
             true
           }
@@ -340,9 +345,7 @@ class FloatingWidgetService : Service() {
         }
       }
     }
-  }
-
-  private fun refreshWidgetAtSamePosition() {
+  }private fun refreshWidgetAtSamePosition() {
     val currentX = layoutParams?.x ?: 40
     val currentY = layoutParams?.y ?: 320
 
@@ -488,6 +491,6 @@ class FloatingWidgetService : Service() {
     private const val KEY_WIDGET_COLLAPSED = "widget_collapsed"
     private const val KEY_WIDGET_X = "widget_x"
     private const val KEY_WIDGET_Y = "widget_y"
-    private const val COLLAPSED_TAP_SLOP = 48f
+    private const val COLLAPSED_TAP_SLOP = 96f
   }
 }
