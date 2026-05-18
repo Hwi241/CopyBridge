@@ -852,7 +852,25 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       } else {
         val rawTexts = mutableListOf<String>()
         aiRoots.forEach { root -> service.collectAiAnswerTexts(root, rawTexts) }
-        textToSend = rawTexts.takeLast(50).joinToString("\n")
+
+        val cleanedTexts = mutableListOf<String>()
+        var previousText = ""
+
+        rawTexts.forEach { rawText ->
+          val cleaned = rawText.trim()
+          if (cleaned.isBlank()) return@forEach
+          if (cleaned == previousText) return@forEach
+
+          cleanedTexts.add(cleaned)
+          previousText = cleaned
+        }
+
+        val fullText = cleanedTexts.joinToString("\n")
+        textToSend = if (fullText.length > MAX_COPY_CHARS) {
+          fullText.take(MAX_COPY_CHARS)
+        } else {
+          fullText
+        }
       }
 
       if (textToSend.isBlank()) {
