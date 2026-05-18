@@ -286,10 +286,48 @@ class FloatingWidgetService : Service() {
       background = roundedBackground(Color.parseColor("#171717"), 48f)
       setPadding(24, 24, 24, 24)
       elevation = 12f
-      setOnClickListener {
-        isCollapsed = false; saveWidgetPreferences(); refreshWidgetAtSamePosition()
+      setOnTouchListener { view, event ->
+        val params = this@FloatingWidgetService.layoutParams ?: return@setOnTouchListener true
+
+        when (event.action) {
+          MotionEvent.ACTION_DOWN -> {
+            view.alpha = 0.55f
+            initialX = params.x
+            initialY = params.y
+            initialTouchX = event.rawX
+            initialTouchY = event.rawY
+            true
+          }
+
+          MotionEvent.ACTION_MOVE -> {
+            params.x = initialX + (event.rawX - initialTouchX).toInt()
+            params.y = initialY + (event.rawY - initialTouchY).toInt()
+            windowManager?.updateViewLayout(floatingView, params)
+            saveWidgetPosition(params.x, params.y)
+            true
+          }
+
+          MotionEvent.ACTION_UP -> {
+            view.alpha = 1f
+            val dx = event.rawX - initialTouchX
+            val dy = event.rawY - initialTouchY
+            val isTap = dx > -12f && dx < 12f && dy > -12f && dy < 12f
+            if (isTap) {
+              isCollapsed = false
+              saveWidgetPreferences()
+              refreshWidgetAtSamePosition()
+            }
+            true
+          }
+
+          MotionEvent.ACTION_CANCEL -> {
+            view.alpha = 1f
+            true
+          }
+
+          else -> true
+        }
       }
-      setOnTouchListener { _, event -> handleDrag(event); true }
     }
   }
 
