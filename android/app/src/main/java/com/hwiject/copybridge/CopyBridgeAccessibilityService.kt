@@ -876,7 +876,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
         aiEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         aiEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        performImeEnterIfPossible(aiEdit)
+        service.performImeEnterIfPossible(aiEdit)
         Handler(Looper.getMainLooper()).postDelayed({
           val retryRoots = service.getAiRoots()
           val retrySent = service.clickAiSendButton(retryRoots)
@@ -926,7 +926,9 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       } else {
         val fullText = cleanedTexts.joinToString("\n")
         textToSend = service.clampCopyText(fullText)
-      }if (textToSend.isBlank()) {
+      }
+
+      if (textToSend.isBlank()) {
         val debug = service.buildAiWindowDebugInfo("GPT 텍스트를 찾지 못함 (mode=$gptOutputMode)", aiRoots)
         service.copyToClipboard(debug)
         Toast.makeText(context, "GPT 텍스트를 찾지 못했습니다. 진단 정보가 복사되었습니다.", Toast.LENGTH_SHORT).show()
