@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Rect
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Bundle
@@ -521,7 +522,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     roots.forEach { root ->
       val sendButton = findSendButton(root)
       if (sendButton != null) {
-        return sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        return clickNodeOrClickableParent(sendButton)
       }
     }
     return false
@@ -579,10 +580,32 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     return aiKeywords.any { lower.contains(it) }
   }
 
+  private fun clickNodeOrClickableParent(node: AccessibilityNodeInfo?): Boolean {
+    if (node == null) return false
+    if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+    var parent = node.parent
+    var depth = 0
+    while (parent != null && depth < 5) {
+      if (parent.isClickable && parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+      parent = parent.parent
+      depth += 1
+    }
+    return false
+  }
+
+  private fun performImeEnterIfPossible(node: AccessibilityNodeInfo?): Boolean {
+    if (node == null) return false
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+    } else {
+      false
+    }
+  }
+
   private fun clickAiSendButton(roots: List<AccessibilityNodeInfo>): Boolean {
     roots.forEach { root ->
       val btn = findAiSendButton(root)
-      if (btn != null) return btn.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+      if (btn != null) return clickNodeOrClickableParent(btn)
     }
     return false
   }
@@ -790,7 +813,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
                 }
               }, 200L)
             }
-          }, 300L)
+          }, 700L)
         } else {
           Toast.makeText(context, "GPT 입력창에 넣었습니다.", Toast.LENGTH_SHORT).show()
         }
