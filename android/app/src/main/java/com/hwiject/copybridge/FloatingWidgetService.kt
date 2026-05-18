@@ -278,7 +278,7 @@ class FloatingWidgetService : Service() {
     return panel
   }
 
-      private fun createCollapsedView(): View {
+  private fun createCollapsedView(): View {
     return TextView(this).apply {
       text = "B"
       setTextColor(Color.WHITE)
@@ -288,17 +288,31 @@ class FloatingWidgetService : Service() {
       background = roundedBackground(Color.parseColor("#171717"), 48f)
       setPadding(24, 24, 24, 24)
       elevation = 12f
-      isClickable = true
-      isFocusable = false
-      setOnClickListener {
-        isCollapsed = false
-        saveWidgetPreferences()
-        Handler(Looper.getMainLooper()).post {
-          refreshWidgetAtSamePosition()
+
+      setOnTouchListener { view, event ->
+        when (event.action) {
+          MotionEvent.ACTION_DOWN -> {
+            initialTouchX = event.rawX
+            initialTouchY = event.rawY
+            true
+          }
+          MotionEvent.ACTION_UP -> {
+            val dx = event.rawX - initialTouchX
+            val dy = event.rawY - initialTouchY
+            if (dx >= -48f && dx <= 48f && dy >= -48f && dy <= 48f) {
+              isCollapsed = false
+              saveWidgetPreferences()
+              view.post { refreshWidgetAtSamePosition() }
+            }
+            true
+          }
+          else -> false
         }
       }
     }
-  }private fun refreshWidgetAtSamePosition() {
+  }
+
+  private fun refreshWidgetAtSamePosition() {
     val currentX = layoutParams?.x ?: 40
     val currentY = layoutParams?.y ?: 320
 
