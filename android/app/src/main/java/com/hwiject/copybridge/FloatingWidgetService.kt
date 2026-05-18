@@ -8,6 +8,8 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.IBinder
 import android.provider.Settings
 import android.view.Gravity
@@ -300,10 +302,16 @@ class FloatingWidgetService : Service() {
           }
 
           MotionEvent.ACTION_MOVE -> {
-            params.x = initialX + (event.rawX - initialTouchX).toInt()
-            params.y = initialY + (event.rawY - initialTouchY).toInt()
-            windowManager?.updateViewLayout(floatingView, params)
-            saveWidgetPosition(params.x, params.y)
+            val dx = event.rawX - initialTouchX
+            val dy = event.rawY - initialTouchY
+            val isDrag = dx < -COLLAPSED_TAP_SLOP || dx > COLLAPSED_TAP_SLOP ||
+              dy < -COLLAPSED_TAP_SLOP || dy > COLLAPSED_TAP_SLOP
+            if (isDrag) {
+              params.x = initialX + dx.toInt()
+              params.y = initialY + dy.toInt()
+              windowManager?.updateViewLayout(floatingView, params)
+              saveWidgetPosition(params.x, params.y)
+            }
             true
           }
 
@@ -311,11 +319,14 @@ class FloatingWidgetService : Service() {
             view.alpha = 1f
             val dx = event.rawX - initialTouchX
             val dy = event.rawY - initialTouchY
-            val isTap = dx > -12f && dx < 12f && dy > -12f && dy < 12f
+            val isTap = dx >= -COLLAPSED_TAP_SLOP && dx <= COLLAPSED_TAP_SLOP &&
+              dy >= -COLLAPSED_TAP_SLOP && dy <= COLLAPSED_TAP_SLOP
             if (isTap) {
-              isCollapsed = false
-              saveWidgetPreferences()
-              refreshWidgetAtSamePosition()
+              Handler(Looper.getMainLooper()).post {
+                isCollapsed = false
+                saveWidgetPreferences()
+                refreshWidgetAtSamePosition()
+              }
             }
             true
           }
@@ -477,5 +488,6 @@ class FloatingWidgetService : Service() {
     private const val KEY_WIDGET_COLLAPSED = "widget_collapsed"
     private const val KEY_WIDGET_X = "widget_x"
     private const val KEY_WIDGET_Y = "widget_y"
+    private const val COLLAPSED_TAP_SLOP = 48f
   }
 }
