@@ -64,6 +64,11 @@ class FloatingWidgetService : Service() {
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    if (intent?.action == ACTION_RESTORE_WIDGET) {
+      restoreExpandedWidget()
+      return START_STICKY
+    }
+
     if (!canDrawOverlay()) {
       Toast.makeText(this, "오버레이 권한이 필요합니다.", Toast.LENGTH_SHORT).show()
       stopSelf()
@@ -329,6 +334,16 @@ class FloatingWidgetService : Service() {
       addView(restoreButton, LinearLayout.LayoutParams(
         LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
       ).apply { topMargin = 4 })
+
+      setOnClickListener {
+        isCollapsed = false
+        saveWidgetPreferences()
+        refreshWidgetAtSamePosition()
+      }
+      setOnTouchListener { view, event ->
+        applyPressFeedback(view, event)
+        false
+      }
     }
   }
 
@@ -344,6 +359,28 @@ class FloatingWidgetService : Service() {
       newParams.y = currentY
       windowManager?.updateViewLayout(floatingView, newParams)
     }
+  }
+
+  private fun restoreExpandedWidget() {
+    isCollapsed = false
+    saveWidgetPreferences()
+
+    val x = layoutParams?.x ?: 40
+    val y = layoutParams?.y ?: 320
+
+    if (floatingView != null) {
+      refreshWidgetAtSamePosition()
+    } else {
+      showFloatingWidget()
+    }
+
+    layoutParams?.let { params ->
+      params.x = x
+      params.y = y
+      windowManager?.updateViewLayout(floatingView, params)
+    }
+
+    Toast.makeText(this, "위젯을 복원했습니다.", Toast.LENGTH_SHORT).show()
   }
 
   private fun createHeaderButton(label: String, onClick: () -> Unit): TextView {
@@ -469,13 +506,14 @@ class FloatingWidgetService : Service() {
     }
   }
 
-  private companion object {
+  companion object {
     private const val PREFS_NAME = "copybridge_floating_widget"
     private const val KEY_WIDGET_SIZE = "widget_size"
     private const val KEY_AUTO_SEND_ENABLED = "auto_send_enabled"
     private const val KEY_REPLY_COPY_MODE = "reply_copy_mode"
     private const val KEY_GPT_OUTPUT_MODE = "gpt_output_mode"
     private const val KEY_WIDGET_COLLAPSED = "widget_collapsed"
+    const val ACTION_RESTORE_WIDGET = "com.hwiject.copybridge.RESTORE_WIDGET"
     private const val KEY_WIDGET_X = "widget_x"
     private const val KEY_WIDGET_Y = "widget_y"
     private const val COLLAPSED_TAP_SLOP = 96f

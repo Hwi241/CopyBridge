@@ -71,4 +71,18 @@ class CopyBridgeNativeModule(
  promise.reject("STOP_FLOATING_WIDGET_FAILED", error)
  }
  }
+
+ @ReactMethod
+ fun restoreFloatingWidget(promise: Promise) {
+ try {
+ val intent = Intent(reactContext, FloatingWidgetService::class.java).apply {
+ action = FloatingWidgetService.ACTION_RESTORE_WIDGET
+ }
+ reactContext.startService(intent)
+ Toast.makeText(reactContext, "CopyBridge 위젯 복원 요청", Toast.LENGTH_SHORT).show()
+ promise.resolve(true)
+ } catch (error: Exception) {
+ promise.reject("RESTORE_FLOATING_WIDGET_FAILED", error)
+ }
+ }
 }
