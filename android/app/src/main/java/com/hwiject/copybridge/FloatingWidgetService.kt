@@ -279,36 +279,56 @@ class FloatingWidgetService : Service() {
   }
 
   private fun createCollapsedView(): View {
-    return TextView(this).apply {
-      text = "B"
-      setTextColor(Color.WHITE)
-      textSize = 20f
-      typeface = Typeface.DEFAULT_BOLD
-      gravity = Gravity.CENTER
-      background = roundedBackground(Color.parseColor("#171717"), 48f)
-      setPadding(24, 24, 24, 24)
-      elevation = 12f
+    return LinearLayout(this).apply {
+      orientation = LinearLayout.VERTICAL
+      gravity = Gravity.CENTER_HORIZONTAL
 
-      setOnTouchListener { view, event ->
-        when (event.action) {
-          MotionEvent.ACTION_DOWN -> {
-            initialTouchX = event.rawX
-            initialTouchY = event.rawY
-            true
-          }
-          MotionEvent.ACTION_UP -> {
-            val dx = event.rawX - initialTouchX
-            val dy = event.rawY - initialTouchY
-            if (dx >= -48f && dx <= 48f && dy >= -48f && dy <= 48f) {
-              isCollapsed = false
-              saveWidgetPreferences()
-              view.post { refreshWidgetAtSamePosition() }
-            }
-            true
-          }
-          else -> false
+      val bButton = TextView(context).apply {
+        text = "B"
+        setTextColor(Color.WHITE)
+        textSize = 20f
+        typeface = Typeface.DEFAULT_BOLD
+        gravity = Gravity.CENTER
+        background = roundedBackground(Color.parseColor("#171717"), 48f)
+        setPadding(24, 24, 24, 24)
+        elevation = 12f
+
+        setOnClickListener {
+          isCollapsed = false
+          saveWidgetPreferences()
+          refreshWidgetAtSamePosition()
+        }
+        setOnTouchListener { view, event ->
+          applyPressFeedback(view, event)
+          false
         }
       }
+
+      val restoreButton = TextView(context).apply {
+        text = "복원"
+        setTextColor(Color.WHITE)
+        textSize = 11f
+        gravity = Gravity.CENTER
+        background = roundedBackground(Color.parseColor("#333333"), 8f)
+        setPadding(12, 4, 12, 4)
+
+        setOnClickListener {
+          isCollapsed = false
+          saveWidgetPreferences()
+          refreshWidgetAtSamePosition()
+        }
+        setOnTouchListener { view, event ->
+          applyPressFeedback(view, event)
+          false
+        }
+      }
+
+      addView(bButton, LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+      ))
+      addView(restoreButton, LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+      ).apply { topMargin = 4 })
     }
   }
 
