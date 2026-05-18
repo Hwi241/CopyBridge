@@ -812,7 +812,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         }
       } else {
         val rawTexts = mutableListOf<String>()
-        aiRoots.forEach { root -> collectAiAnswerTexts(root, rawTexts) }
+        aiRoots.forEach { root -> service.collectAiAnswerTexts(root, rawTexts) }
         textToSend = rawTexts.takeLast(50).joinToString("\n")
       }
 
