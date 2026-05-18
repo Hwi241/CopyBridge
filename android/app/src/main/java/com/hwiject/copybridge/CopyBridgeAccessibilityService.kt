@@ -599,12 +599,18 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
   private fun isAiSendButton(node: AccessibilityNodeInfo): Boolean {
     if (!node.isEnabled) return false
-    val text = node.text?.toString().orEmpty()
-    val desc = node.contentDescription?.toString().orEmpty()
+    val text = node.text?.toString()?.trim().orEmpty()
+    val desc = node.contentDescription?.toString()?.trim().orEmpty()
     val viewId = node.viewIdResourceName.orEmpty()
-    val combined = "$text $desc $viewId".lowercase()
-    val looksLikeSend = combined.contains("send") || combined.contains("submit") ||
-      combined.contains("arrow") || combined.contains("전송") || combined.contains("보내기")
+    val lowerText = text.lowercase()
+    val lowerDesc = desc.lowercase()
+    val lowerViewId = viewId.lowercase()
+    val descLooksLike = lowerDesc.contains("send") || lowerDesc.contains("submit") ||
+      lowerDesc.contains("전송") || lowerDesc.contains("보내기") || lowerDesc.contains("메시지 보내기")
+    val viewIdLooksLike = lowerViewId.contains("send") || lowerViewId.contains("submit")
+    val textExact = lowerText == "send" || lowerText == "submit" ||
+      lowerText == "전송" || lowerText == "보내기"
+    val looksLikeSend = descLooksLike || viewIdLooksLike || textExact
     if (!looksLikeSend) return false
     return node.isClickable || node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK }
   }
@@ -770,14 +776,24 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         if (autoSend) {
           Handler(Looper.getMainLooper()).postDelayed({
             val freshRoots = service.getAiRoots()
-            val sent = service.clickAiSendButton(freshRoots)
+            var sent = service.clickAiSendButton(freshRoots)
             if (!sent) {
-              val debug = service.buildAiWindowDebugInfo("GPT 전송 버튼 찾기 실패", freshRoots)
-              service.copyToClipboard(debug)
+              aiEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+              aiEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+              Handler(Looper.getMainLooper()).postDelayed({
+                val retryRoots = service.getAiRoots()
+                val retry = service.clickAiSendButton(retryRoots)
+                if (!retry) {
+                  val debug = service.buildAiWindowDebugInfo("GPT 전송 버튼 찾기 실패", retryRoots)
+                  service.copyToClipboard(debug)
+                  Toast.makeText(context, "GPT 전송 버튼을 찾지 못했습니다. 진단 정보가 복사되었습니다.", Toast.LENGTH_SHORT).show()
+                }
+              }, 200L)
             }
-          }, 250L)
+          }, 300L)
+        } else {
+          Toast.makeText(context, "GPT 입력창에 넣었습니다.", Toast.LENGTH_SHORT).show()
         }
-        Toast.makeText(context, "GPT로 보내기 완료", Toast.LENGTH_SHORT).show()
       } else {
         val debug = service.buildAiWindowDebugInfo("GPT 텍스트 입력 실패", aiRoots)
         service.copyToClipboard(debug)
@@ -817,7 +833,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       }
 
       if (textToSend.isBlank()) {
-        val debug = service.buildAiWindowDebugInfo("GPT 텍스트를 찾지 못함", aiRoots)
+        val debug = service.buildAiWindowDebugInfo("GPT 텍스트를 찾지 못함 (mode=$gptOutputMode)", aiRoots)
         service.copyToClipboard(debug)
         Toast.makeText(context, "GPT 텍스트를 찾지 못했습니다. 진단 정보가 복사되었습니다.", Toast.LENGTH_SHORT).show()
         return false
@@ -837,11 +853,17 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         return true
       }
 
-      if (service.setTextToNode(tgEdit, textToSend)) {
+      val setOk = service.setTextToNode(tgEdit, textToSend)
+      val inputOk = if (setOk) true else {
+        service.copyToClipboard(textToSend)
+        service.pasteClipboardToNode(tgEdit)
+      }
+      if (inputOk) {
         if (autoSend) {
           service.scheduleAutoSendAfterPaste("GPT→TG", tgEdit)
+        } else {
+          Toast.makeText(context, "Telegram 입력창에 넣었습니다.", Toast.LENGTH_SHORT).show()
         }
-        Toast.makeText(context, "텔레그램으로 보내기 완료", Toast.LENGTH_SHORT).show()
       } else {
         val debug = service.buildTelegramCopyDebugInfo(tgRoots)
         service.copyToClipboard(debug)
