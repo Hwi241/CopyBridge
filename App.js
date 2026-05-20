@@ -179,13 +179,7 @@ export default function App() {
             <Text style={styles.secondaryButtonText}>떠 있는 위젯 끄기</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.secondaryButton}
-            activeOpacity={0.8}
-            onPress={() => runNativeAction('위젯 복원', 'restoreFloatingWidget')}
-          >
-            <Text style={styles.secondaryButtonText}>위젯 복원</Text>
-          </TouchableOpacity>
+          
         </View>
 
         <Text style={styles.notice}>

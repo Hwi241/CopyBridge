@@ -309,31 +309,9 @@ class FloatingWidgetService : Service() {
         }
       }
 
-      val restoreButton = TextView(context).apply {
-        text = "복원"
-        setTextColor(Color.WHITE)
-        textSize = 11f
-        gravity = Gravity.CENTER
-        background = roundedBackground(Color.parseColor("#333333"), 8f)
-        setPadding(12, 4, 12, 4)
-
-        setOnClickListener {
-          isCollapsed = false
-          saveWidgetPreferences()
-          refreshWidgetAtSamePosition()
-        }
-        setOnTouchListener { view, event ->
-          applyPressFeedback(view, event)
-          false
-        }
-      }
-
       addView(bButton, LinearLayout.LayoutParams(
         LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
       ))
-      addView(restoreButton, LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-      ).apply { topMargin = 4 })
 
       setOnClickListener {
         isCollapsed = false
