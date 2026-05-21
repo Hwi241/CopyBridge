@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
   Alert,
@@ -12,6 +13,58 @@ import {
 } from 'react-native';
 
 export default function App() {
+  const [debugLogs, setDebugLogs] = useState('');
+
+  const getNativeModule = () => NativeModules.CopyBridgeNativeModule;
+
+  const loadDebugLogs = useCallback(async () => {
+    const nativeModule = getNativeModule();
+    if (Platform.OS !== 'android') {
+      setDebugLogs('Android APK\uc5d0\uc11c\ub9cc \ub85c\uadf8\ub97c \ud655\uc778\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.');
+      return;
+    }
+    if (!nativeModule || typeof nativeModule.getDebugLogs !== 'function') {
+      setDebugLogs('\ub124\uc774\ud2f0\ube0c \ub85c\uadf8 \uae30\ub2a5\uc774 \uc544\uc9c1 \uc5f0\uacb0\ub418\uc9c0 \uc54a\uc558\uc2b5\ub2c8\ub2e4.');
+      return;
+    }
+    try {
+      const logs = await nativeModule.getDebugLogs();
+      setDebugLogs(logs || '');
+    } catch (error) {
+      setDebugLogs('\ub85c\uadf8\ub97c \ubd88\ub7ec\uc624\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.');
+    }
+  }, []);
+
+  const copyDebugLogs = async () => {
+    const nativeModule = getNativeModule();
+    if (!nativeModule || typeof nativeModule.copyDebugLogs !== 'function') {
+      Alert.alert('\ub124\uc774\ud2f0\ube0c \uc5f0\uacb0 \ud544\uc694', '\ub85c\uadf8 \ubcf5\uc0ac \uae30\ub2a5\uc740 \uc2e4\uc81c Android APK\uc5d0\uc11c \uc0ac\uc6a9\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.');
+      return;
+    }
+    try {
+      await nativeModule.copyDebugLogs();
+      await loadDebugLogs();
+      Alert.alert('\ubcf5\uc0ac \uc644\ub8cc', 'CopyBridge \ub85c\uadf8\ub97c \ud074\ub9bd\ubcf4\ub4dc\uc5d0 \ubcf5\uc0ac\ud588\uc2b5\ub2c8\ub2e4.');
+    } catch (error) {
+      Alert.alert('\ubcf5\uc0ac \uc2e4\ud328', 'CopyBridge \ub85c\uadf8\ub97c \ubcf5\uc0ac\ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.');
+    }
+  };
+
+  const clearDebugLogs = async () => {
+    const nativeModule = getNativeModule();
+    if (!nativeModule || typeof nativeModule.clearDebugLogs !== 'function') {
+      Alert.alert('\ub124\uc774\ud2f0\ube0c \uc5f0\uacb0 \ud544\uc694', '\ub85c\uadf8 \ube44\uc6b0\uae30 \uae30\ub2a5\uc740 \uc2e4\uc81c Android APK\uc5d0\uc11c \uc0ac\uc6a9\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.');
+      return;
+    }
+    try {
+      await nativeModule.clearDebugLogs();
+      await loadDebugLogs();
+    } catch (error) {
+      Alert.alert('\uc2e4\ud589 \uc2e4\ud328', 'CopyBridge \ub85c\uadf8\ub97c \ube44\uc6b0\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.');
+    }
+  };
+
+  useEffect(() => { loadDebugLogs(); }, [loadDebugLogs]);
   const showNextStepAlert = (label) => {
     Alert.alert(
       '다음 단계에서 연결',
@@ -37,6 +90,7 @@ export default function App() {
 
     try {
       await nativeModule[actionName]();
+      await loadDebugLogs();
     } catch (error) {
       Alert.alert('실행 실패', `${label} 기능을 실행하지 못했습니다.`);
     }
@@ -180,6 +234,47 @@ export default function App() {
           </TouchableOpacity>
 
           
+        </View>
+
+        <View style={styles.logCard}>
+          <View style={styles.logHeader}>
+            <Text style={styles.sectionTitle}>테스트 로그</Text>
+            <TouchableOpacity
+              style={styles.logSmallButton}
+              activeOpacity={0.8}
+              onPress={loadDebugLogs}
+            >
+              <Text style={styles.logSmallButtonText}>새로고침</Text>
+            </TouchableOpacity>
+          </View>
+
+          <Text style={styles.logDescription}>
+            GPT/TG 전송 테스트 결과가 여기에 누적됩니다. 문제가 생기면 전체 로그 복사 후 전달하세요.
+          </Text>
+
+          <View style={styles.logBox}>
+            <Text style={styles.logText}>
+              {debugLogs.trim() ? debugLogs : '아직 \uae30\ub85d\ub41c \ub85c\uadf8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.'}
+            </Text>
+          </View>
+
+          <View style={styles.logActions}>
+            <TouchableOpacity
+              style={styles.logActionButton}
+              activeOpacity={0.8}
+              onPress={copyDebugLogs}
+            >
+              <Text style={styles.logActionButtonText}>전체 로그 복사</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.logActionButton}
+              activeOpacity={0.8}
+              onPress={clearDebugLogs}
+            >
+              <Text style={styles.logActionButtonText}>로그 비우기</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         <Text style={styles.notice}>
@@ -418,6 +513,70 @@ const styles = StyleSheet.create({
   secondaryButtonText: {
     color: '#222222',
     fontSize: 16,
+    fontWeight: '700',
+  },
+  logCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 18,
+    marginBottom: 18,
+    shadowColor: '#000000',
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 3,
+  },
+  logHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  logSmallButton: {
+    backgroundColor: '#333333',
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  logSmallButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  logDescription: {
+    marginTop: -8,
+    marginBottom: 12,
+    fontSize: 13,
+    lineHeight: 19,
+    color: '#817A70',
+  },
+  logBox: {
+    minHeight: 160,
+    maxHeight: 260,
+    backgroundColor: '#171717',
+    borderRadius: 14,
+    padding: 12,
+  },
+  logText: {
+    color: '#F7F4EF',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  logActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 12,
+  },
+  logActionButton: {
+    flex: 1,
+    backgroundColor: '#333333',
+    borderRadius: 14,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  logActionButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
     fontWeight: '700',
   },
   notice: {

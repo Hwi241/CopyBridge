@@ -41,6 +41,32 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     super.onDestroy()
   }
 
+  private fun appendDebugLog(category: String, message: String) {
+    val prefs = getSharedPreferences(DEBUG_LOG_PREFS_NAME, MODE_PRIVATE)
+    val oldLogs = prefs.getString(DEBUG_LOG_KEY, "").orEmpty()
+    val entries = oldLogs
+      .split("\n---\n")
+      .filter { it.isNotBlank() }
+      .toMutableList()
+
+    val time = android.text.format.DateFormat
+      .format("HH:mm:ss", System.currentTimeMillis())
+      .toString()
+
+    entries.add("[$time][$category] $message")
+
+    val trimmed = entries.takeLast(MAX_DEBUG_LOG_ENTRIES).joinToString("\n---\n")
+    prefs.edit().putString(DEBUG_LOG_KEY, trimmed).apply()
+  }
+
+  private fun compactLogPreview(text: String): String {
+    return text
+      .replace("\n", " ")
+      .replace(Regex("\\s+"), " ")
+      .trim()
+      .take(1200)
+  }
+
   private fun handleCopyTelegramToAiRequest() {
     val telegramRoots = getTelegramRoots()
 
@@ -253,6 +279,14 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val left: Int
   )
 
+  private data class CopyButtonCandidate(
+    val node: AccessibilityNodeInfo,
+    val label: String,
+    val top: Int,
+    val left: Int,
+    val isCodeCopy: Boolean
+  )
+
   private fun collectTelegramMessageCandidates(
     roots: List<AccessibilityNodeInfo>
   ): List<TextCandidate> {
@@ -287,20 +321,51 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     return result.takeLast(MAX_COPY_LINES)
   }
 
-    private fun collectTelegramFullModeTexts(
+  private fun collectTelegramFullModeTexts(
     roots: List<AccessibilityNodeInfo>
   ): List<String> {
-    val rawCandidates = mutableListOf<TextCandidate>()
+    val primaryCandidates = mutableListOf<TextCandidate>()
+    val broadCandidates = mutableListOf<TextCandidate>()
 
     roots.forEach { root ->
       val rootRect = Rect()
       root.getBoundsInScreen(rootRect)
       if (!rootRect.isEmpty()) {
-        collectVisibleMessageTextCandidates(root, rootRect, rawCandidates)
+        collectVisibleMessageTextCandidates(root, rootRect, primaryCandidates)
+        collectTelegramBroadTextCandidates(root, rootRect, broadCandidates)
       }
     }
 
-    val sorted = rawCandidates
+    val primaryTexts = normalizeTelegramTextCandidates(primaryCandidates)
+    val broadTexts = normalizeTelegramTextCandidates(broadCandidates)
+
+    val chosenTexts = if (primaryTexts.size >= 2) {
+      primaryTexts
+    } else if (broadTexts.size >= primaryTexts.size) {
+      broadTexts
+    } else {
+      primaryTexts
+    }
+
+    val result = mutableListOf<String>()
+    chosenTexts.forEach { text ->
+      addUniqueTelegramText(result, text)
+    }
+
+    val finalResult = result.takeLast(MAX_COPY_LINES)
+
+    appendDebugLog(
+      "TG\u2192GPT",
+      "fullCollect primary=${primaryTexts.size} broad=${broadTexts.size} final=${finalResult.size} preview=${compactLogPreview(finalResult.joinToString("\\n"))}"
+    )
+
+    return finalResult
+  }
+
+  private fun normalizeTelegramTextCandidates(
+    candidates: List<TextCandidate>
+  ): List<String> {
+    return candidates
       .mapNotNull { candidate ->
         val cleaned = normalizeCandidateText(candidate.text)
         if (cleaned.isBlank()) return@mapNotNull null
@@ -308,14 +373,49 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         candidate.copy(text = cleaned)
       }
       .sortedWith(compareBy<TextCandidate> { it.top }.thenBy { it.left })
+      .map { it.text }
+  }
 
-    val result = mutableListOf<String>()
+  private fun collectTelegramBroadTextCandidates(
+    node: AccessibilityNodeInfo?,
+    rootRect: Rect,
+    output: MutableList<TextCandidate>
+  ) {
+    if (node == null) return
 
-    sorted.forEach { candidate ->
-      addUniqueTelegramText(result, candidate.text)
+    val rect = Rect()
+    node.getBoundsInScreen(rect)
+
+    val text = node.text?.toString()?.trim()
+    val className = node.className?.toString().orEmpty()
+
+    val rootHeight = rootRect.height().coerceAtLeast(1)
+    val messageAreaTop = rootRect.top + (rootHeight * 0.08f).toInt()
+    val messageAreaBottom = rootRect.bottom - (rootHeight * 0.12f).toInt()
+    val intersectsMessageArea = rect.bottom >= messageAreaTop && rect.top <= messageAreaBottom
+
+    val isInputLike = className.contains("EditText", ignoreCase = true)
+
+    if (
+      !rect.isEmpty() &&
+      intersectsMessageArea &&
+      !isInputLike &&
+      !text.isNullOrBlank()
+    ) {
+      output.add(
+        TextCandidate(
+          text = text,
+          top = rect.top,
+          bottom = rect.bottom,
+          left = rect.left,
+          right = rect.right
+        )
+      )
     }
 
-    return result.takeLast(MAX_COPY_LINES)
+    for (i in 0 until node.childCount) {
+      collectTelegramBroadTextCandidates(node.getChild(i), rootRect, output)
+    }
   }
 
   private fun addUniqueTelegramText(output: MutableList<String>, text: String) {
@@ -732,6 +832,206 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   }
 
 
+  private fun copyGptOutputByChatGptButton(
+    gptOutputMode: String,
+    aiRoots: List<AccessibilityNodeInfo>
+  ): String? {
+    val copyButtons = mutableListOf<CopyButtonCandidate>()
+
+    aiRoots.forEach { root ->
+      collectGptCopyButtonCandidates(root, copyButtons)
+    }
+
+    appendDebugLog("GPT\u2192TG", "COPY_BUTTON candidates=${copyButtons.size} mode=$gptOutputMode")
+
+    val target = if (gptOutputMode == "CODE") {
+      copyButtons
+        .filter { it.isCodeCopy }
+        .maxWithOrNull(compareBy<CopyButtonCandidate> { it.top }.thenBy { it.left })
+    } else {
+      copyButtons
+        .filter { !it.isCodeCopy }
+        .maxWithOrNull(compareBy<CopyButtonCandidate> { it.top }.thenBy { it.left })
+    } ?: run {
+        appendDebugLog("GPT\u2192TG", "COPY_BUTTON target=null mode=$gptOutputMode")
+        return null
+      }
+
+    appendDebugLog("GPT\u2192TG", "COPY_BUTTON target label=${compactLogPreview(target.label)} top=${target.top} left=${target.left}")
+
+    val sentinel = "__COPYBRIDGE_COPY_SENTINEL_${System.currentTimeMillis()}"
+    copyToClipboard(sentinel)
+
+    val clicked = clickNodeOrClickableParent(target.node)
+    appendDebugLog("GPT\u2192TG", "COPY_BUTTON clicked=$clicked")
+    if (!clicked) return null
+
+    var copied = ""
+    var copiedReady = false
+
+    for (attempt in 1..6) {
+      android.os.SystemClock.sleep(300L)
+      copied = readClipboardText()
+
+      val isSentinel = copied == sentinel || copied.startsWith("__COPYBRIDGE_COPY_SENTINEL_")
+      val usable = copied.isNotBlank() && !isSentinel
+
+      appendDebugLog(
+        "GPT\u2192TG",
+        "COPY_BUTTON poll=$attempt copiedLength=${copied.length} isBlank=${copied.isBlank()} isSentinel=$isSentinel usable=$usable"
+      )
+
+      if (usable) {
+        copiedReady = true
+        break
+      }
+    }
+
+    if (!copiedReady) {
+      appendDebugLog("GPT\u2192TG", "COPY_BUTTON directPasteToken=true reason=clipboardReadFailed")
+      return null
+    }
+
+    return copied.trim()
+  }
+
+  private fun collectGptCopyButtonCandidates(
+    node: AccessibilityNodeInfo?,
+    output: MutableList<CopyButtonCandidate>
+  ) {
+    if (node == null) return
+
+    val rect = Rect()
+    node.getBoundsInScreen(rect)
+
+    val textValue = node.text?.toString()?.trim().orEmpty()
+    val descValue = node.contentDescription?.toString()?.trim().orEmpty()
+    val label = listOf(textValue, descValue)
+      .filter { it.isNotBlank() }
+      .joinToString(" ")
+      .trim()
+
+    if (!rect.isEmpty() && label.isNotBlank() && node.isEnabled) {
+      val lower = label.lowercase()
+
+      val isCodeCopy =
+        lower == "코드 복사" ||
+        lower.contains("code copy") ||
+        lower.contains("copy code")
+
+      val isAnswerCopy =
+        lower == "복사" ||
+        lower == "copy"
+
+      if (isCodeCopy || isAnswerCopy) {
+        output.add(
+          CopyButtonCandidate(
+            node = node,
+            label = label,
+            top = rect.top,
+            left = rect.left,
+            isCodeCopy = isCodeCopy
+          )
+        )
+      }
+    }
+
+    for (i in 0 until node.childCount) {
+      collectGptCopyButtonCandidates(node.getChild(i), output)
+    }
+  }
+
+    private fun tryPasteGptCopyButtonToTelegram(
+    gptOutputMode: String,
+    aiRoots: List<AccessibilityNodeInfo>,
+    autoSend: Boolean
+  ): Boolean {
+    val copyButtons = mutableListOf<CopyButtonCandidate>()
+    aiRoots.forEach { root -> collectGptCopyButtonCandidates(root, copyButtons) }
+    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE candidates=${copyButtons.size} mode=$gptOutputMode")
+    val target = findBestGptCopyButtonForPaste(gptOutputMode, copyButtons)
+    if (target == null) {
+      appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE target=null mode=$gptOutputMode")
+      return false
+    }
+    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE target label=${compactLogPreview(target.label)} top=${target.top} left=${target.left} isCode=${target.isCodeCopy}")
+    val clicked = clickNodeOrClickableParent(target.node)
+    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE clicked=$clicked")
+    if (!clicked) return false
+    android.os.SystemClock.sleep(900L)
+    val tgRoots = getTelegramRoots()
+    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE telegramRoots=${tgRoots.size}")
+    if (tgRoots.isEmpty()) return false
+    val tgEdit = findEditableNodeFromRoots(tgRoots)
+    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE telegramEdit=${tgEdit != null}")
+    if (tgEdit == null) return false
+    tgEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+    tgEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    val pasted = try { pasteClipboardToNode(tgEdit) } catch (error: Exception) { appendDebugLog("GPT→TG", "EXCEPTION copyButtonPaste ${error::class.java.simpleName}: ${error.message}"); false }
+    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE pasted=$pasted autoSend=$autoSend")
+    if (!pasted) return false
+    if (autoSend) { scheduleAutoSendAfterPaste("GPT→TG:$gptOutputMode:copyButtonPaste", tgEdit) } else { Toast.makeText(this, "Telegram 입력창에 넣었습니다.", Toast.LENGTH_SHORT).show() }
+    return true
+  }
+
+  private fun findBestGptCopyButtonForPaste(
+    gptOutputMode: String,
+    copyButtons: List<CopyButtonCandidate>
+  ): CopyButtonCandidate? {
+    if (copyButtons.isEmpty()) return null
+    val sorted = copyButtons.sortedWith(compareBy<CopyButtonCandidate> { it.top }.thenBy { it.left })
+    return if (gptOutputMode == "CODE") {
+      val explicitCodeCopy = sorted.filter { it.isCodeCopy }
+      val rightSideCopy = sorted.filter { !it.isCodeCopy && (it.label.lowercase() == "복사" || it.label.lowercase() == "copy") && it.left >= 1200 }
+      (explicitCodeCopy + rightSideCopy).lastOrNull()
+    } else {
+      sorted.filter { !it.isCodeCopy }.lastOrNull()
+    }
+  }
+
+  private fun collectLatestAiAnswerFallbackTexts(
+    roots: List<AccessibilityNodeInfo>
+  ): List<String> {
+    val copyButtons = mutableListOf<CopyButtonCandidate>()
+    roots.forEach { root ->
+      collectGptCopyButtonCandidates(root, copyButtons)
+    }
+
+    val answerCopyButtons = copyButtons
+      .filter { !it.isCodeCopy }
+      .sortedWith(compareBy<CopyButtonCandidate> { it.top }.thenBy { it.left })
+
+    val latestAnswerCopyButton = answerCopyButtons.lastOrNull()
+    val previousAnswerTop = if (answerCopyButtons.size >= 2) {
+      answerCopyButtons[answerCopyButtons.size - 2].top
+    } else {
+      Int.MIN_VALUE
+    }
+
+    val visibleCandidates = collectAiVisibleTextCandidates(roots)
+
+    val scopedCandidates = if (latestAnswerCopyButton != null) {
+      visibleCandidates.filter { candidate ->
+        candidate.top > previousAnswerTop && candidate.top < latestAnswerCopyButton.top
+      }
+    } else {
+      visibleCandidates
+    }
+
+    val scopedTexts = cleanAiOutputTexts(scopedCandidates.map { it.text })
+
+    appendDebugLog(
+      "GPT\u2192TG",
+      "FULL_FALLBACK answerButtons=${answerCopyButtons.size} visible=${visibleCandidates.size} scoped=${scopedCandidates.size} cleaned=${scopedTexts.size}"
+    )
+
+    return if (scopedTexts.isNotEmpty()) {
+      scopedTexts
+    } else {
+      cleanAiOutputTexts(visibleCandidates.map { it.text })
+    }
+  }
+
   private fun buildGptToTelegramDebugInfo(
     reason: String,
     gptOutputMode: String,
@@ -972,6 +1272,9 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
   companion object {
     private const val TAG = "CopyBridgeA11y"
+    private const val DEBUG_LOG_PREFS_NAME = "copybridge_debug_logs"
+    private const val DEBUG_LOG_KEY = "logs"
+    private const val MAX_DEBUG_LOG_ENTRIES = 50
     private const val MAX_COPY_LINES = 80
     private const val MAX_COPY_CHARS = 8000
     private const val MAX_SINGLE_LINE_LENGTH = 600
@@ -1036,15 +1339,17 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         candidates.takeLast(1).map { it.text }
       } else {
         val fullTexts = service.collectTelegramFullModeTexts(tgRoots)
-        if (fullTexts.isNotEmpty()) {
+        if (fullTexts.size >= 2 || candidates.size <= 1) {
           fullTexts
         } else {
           candidates.map { it.text }
         }
       }
       val textToSend = selectedTexts.joinToString("\n")
+      service.appendDebugLog("TG\u2192GPT", "mode=$copyMode selected=${selectedTexts.size} textLength=${textToSend.length} preview=${service.compactLogPreview(textToSend)}")
 
       val aiRoots = service.getAiRoots()
+      service.appendDebugLog("GPT\u2192TG", "STEP 2 aiRoots=${aiRoots.size}")
       if (aiRoots.isEmpty()) {
         service.copyToClipboard(textToSend)
         Toast.makeText(context, "GPT/AI 앱을 찾지 못했습니다. 텍스트는 클립보드에 복사되었습니다.", Toast.LENGTH_SHORT).show()
@@ -1074,9 +1379,9 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       if (!autoSend) {
         val actualCount = if (copyMode == COPY_MODE_LAST) 1 else selectedTexts.size
         if (inputOk) {
-          Toast.makeText(context, "GPT 입력창에 넣었습니다(전체: $actualCount개).", Toast.LENGTH_SHORT).show()
+          Toast.makeText(context, "GPT 입력창에 넣었습니다(전체: ${actualCount}개).", Toast.LENGTH_SHORT).show()
         } else {
-          Toast.makeText(context, "$actualCount개 텍스트를 클립보드에 복사했습니다.", Toast.LENGTH_SHORT).show()
+          Toast.makeText(context, "${actualCount}개 텍스트를 클립보드에 복사했습니다.", Toast.LENGTH_SHORT).show()
         }
         return true
       }
@@ -1127,21 +1432,56 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         return false
       }
 
-      val aiRoots = service.getAiRoots()
+      service.appendDebugLog("GPT\u2192TG", "START mode=$gptOutputMode autoSend=$autoSend")
+      service.appendDebugLog("GPT\u2192TG", "STEP after START")
+
+       val aiRoots = service.getAiRoots()
+      service.appendDebugLog("GPT\u2192TG", "STEP aiRoots=${aiRoots.size}")
       if (aiRoots.isEmpty()) {
+        service.appendDebugLog("GPT\u2192TG", "STOP aiRoots=0")
         Toast.makeText(context, "GPT/AI 앱을 화면에 열어주세요.", Toast.LENGTH_SHORT).show()
         return false
       }
 
-            var textToSend = ""
+                  val copyButtonPasteOk = service.tryPasteGptCopyButtonToTelegram(gptOutputMode, aiRoots, autoSend)
+                  if (copyButtonPasteOk) {
+                    service.appendDebugLog("GPT→TG", "STOP copyButtonPaste success mode=$gptOutputMode")
+                    return true
+                  }
+                  service.appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE failed -> fallback collect mode=$gptOutputMode")
 
-      val rawTexts = mutableListOf<String>()
-      aiRoots.forEach { root -> service.collectAllTexts(root, rawTexts) }
-      val cleanedTexts = service.cleanAiOutputTexts(rawTexts)
+                  var textToSend = ""
+      var gptCopySource = "unknown"
 
-      if (gptOutputMode == "CODE") {
+      service.appendDebugLog("GPT\u2192TG", "STEP before copyButton mode=$gptOutputMode")
+      val buttonCopyText = try {
+        service.copyGptOutputByChatGptButton(gptOutputMode, aiRoots)
+      } catch (error: Exception) {
+        service.appendDebugLog("GPT\u2192TG", "EXCEPTION copyButton ${error::class.java.simpleName}: ${error.message}")
+        null
+      }
+      service.appendDebugLog("GPT\u2192TG", "STEP after copyButton resultLength=${buttonCopyText?.length ?: -1}")
+
+      if (!buttonCopyText.isNullOrBlank()) {
+        gptCopySource = "chatgpt_copy_button"
+        textToSend = service.clampCopyText(buttonCopyText)
+      } else if (gptOutputMode == "CODE") {
+        gptCopySource = "fallback_code_collect"
+        service.appendDebugLog("GPT\u2192TG", "STEP fallback CODE collect start")
+        val rawTexts = mutableListOf<String>()
+        aiRoots.forEach { root -> service.collectAllTexts(root, rawTexts) }
+        service.appendDebugLog("GPT\u2192TG", "CODE_FALLBACK rawTexts=${rawTexts.size}")
+
+        val cleanedTexts = service.cleanAiOutputTexts(rawTexts)
+        service.appendDebugLog("GPT\u2192TG", "CODE_FALLBACK cleanedTexts=${cleanedTexts.size}")
+
         val codeBlocks = service.extractCodeBlocks(cleanedTexts)
         val codeCandidates = cleanedTexts.filter { service.looksLikeCode(it) }
+
+        service.appendDebugLog(
+          "GPT\u2192TG",
+          "CODE_FALLBACK codeBlocks=${codeBlocks.size} codeCandidates=${codeCandidates.size}"
+        )
 
         val selectedCode = if (codeBlocks.isNotEmpty()) {
           codeBlocks.last().trim()
@@ -1149,12 +1489,24 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
           codeCandidates.maxByOrNull { it.length }?.trim().orEmpty()
         }
 
+        service.appendDebugLog(
+          "GPT\u2192TG",
+          "CODE_FALLBACK selectedLength=${selectedCode.length} preview=${service.compactLogPreview(selectedCode)}"
+        )
+
         textToSend = service.clampCopyText(selectedCode)
+        service.appendDebugLog("GPT\u2192TG", "CODE_FALLBACK textToSendLength=${textToSend.length}")
       } else {
+        gptCopySource = "fallback_full_visible"
+        service.appendDebugLog("GPT\u2192TG", "STEP fallback FULL collect start")
+        val cleanedTexts = service.collectLatestAiAnswerFallbackTexts(aiRoots)
         val fullText = cleanedTexts.joinToString("\n")
+        service.appendDebugLog(
+          "GPT\u2192TG",
+          "FULL_FALLBACK textCount=${cleanedTexts.size} textLength=${fullText.length} preview=${service.compactLogPreview(fullText)}"
+        )
         textToSend = service.clampCopyText(fullText)
       }
-
       if (textToSend.isBlank()) {
         val debug = service.buildAiWindowDebugInfo("GPT 텍스트를 찾지 못함 (mode=$gptOutputMode)", aiRoots)
         service.copyToClipboard(debug)
@@ -1190,10 +1542,23 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         return true
       }
 
-      val setOk = service.setTextToNode(tgEdit, textToSend)
-      val inputOk = if (setOk) true else {
+      val setOk = try {
+        service.setTextToNode(tgEdit, textToSend)
+      } catch (error: Exception) {
+        service.appendDebugLog("GPT\u2192TG", "EXCEPTION setText ${error::class.java.simpleName}: ${error.message}")
+        false
+      }
+
+      val inputOk = if (setOk) {
+        true
+      } else {
         service.copyToClipboard(textToSend)
-        service.pasteClipboardToNode(tgEdit)
+        try {
+          service.pasteClipboardToNode(tgEdit)
+        } catch (error: Exception) {
+          service.appendDebugLog("GPT\u2192TG", "EXCEPTION paste ${error::class.java.simpleName}: ${error.message}")
+          false
+        }
       }
       if (inputOk) {
         if (autoSend) {

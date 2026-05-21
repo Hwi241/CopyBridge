@@ -260,15 +260,34 @@ class FloatingWidgetService : Service() {
     }
 
     val autoSendLabel = if (autoSendEnabled) "전송: 켬" else "전송: 끔"
-    val autoSendButton = createDarkButton(autoSendLabel, size.buttonTextSize) {
-      autoSendEnabled = !autoSendEnabled; saveWidgetPreferences(); refreshWidgetAtSamePosition()
+    val autoSendButton = TextView(this).apply {
+      text = autoSendLabel
+      setTextColor(Color.WHITE)
+      textSize = size.buttonTextSize
+      typeface = Typeface.DEFAULT_BOLD
+      gravity = Gravity.CENTER
+      background = roundedBackground(Color.parseColor("#242424"), 12f)
+      setPadding(8, 0, 8, 0)
+      setOnClickListener {
+        autoSendEnabled = !autoSendEnabled; saveWidgetPreferences(); refreshWidgetAtSamePosition()
+      }
+      setOnTouchListener { view, event ->
+        applyPressFeedback(view, event)
+        false
+      }
+      minHeight = 0
+      minimumHeight = 0
+      includeFontPadding = false
+      isAllCaps = false
     }
 
     val gptButton = createWhiteButton("GPT로 보내기", size.buttonTextSize) {
+            appendDebugLog("WIDGET", "tap GPT로 보내기 replyMode=$replyCopyModeString autoSend=$autoSendEnabled")
       CopyBridgeAccessibilityService.requestTelegramToGpt(this, replyCopyModeString, autoSendEnabled)
     }
 
     val tgButton = createTelegramBlueButton("텔레그램으로 보내기", size.buttonTextSize) {
+            appendDebugLog("WIDGET", "tap 텔레그램으로 보내기 gptMode=$gptOutputModeString autoSend=$autoSendEnabled")
       CopyBridgeAccessibilityService.requestGptToTelegram(this, gptOutputModeString, autoSendEnabled)
     }
 
@@ -283,44 +302,84 @@ class FloatingWidgetService : Service() {
     return panel
   }
 
+  private fun appendDebugLog(category: String, message: String) {
+    val prefs = getSharedPreferences("copybridge_debug_logs", MODE_PRIVATE)
+    val oldLogs = prefs.getString("logs", "").orEmpty()
+    val entries = oldLogs.split("\n---\n").filter { it.isNotBlank() }.toMutableList()
+    val time = android.text.format.DateFormat.format("HH:mm:ss", System.currentTimeMillis()).toString()
+    entries.add("[$time][$category] $message")
+    val trimmed = entries.takeLast(50).joinToString("\n---\n")
+    prefs.edit().putString("logs", trimmed).apply()
+  }
+
   private fun createCollapsedView(): View {
-    return LinearLayout(this).apply {
-      orientation = LinearLayout.VERTICAL
-      gravity = Gravity.CENTER_HORIZONTAL
+    return TextView(this).apply {
+      text = "B"
+      setTextColor(Color.WHITE)
+      textSize = 20f
+      typeface = Typeface.DEFAULT_BOLD
+      gravity = Gravity.CENTER
+      background = roundedBackground(Color.parseColor("#171717"), 48f)
+      setPadding(24, 24, 24, 24)
+      elevation = 12f
 
-      val bButton = TextView(context).apply {
-        text = "B"
-        setTextColor(Color.WHITE)
-        textSize = 20f
-        typeface = Typeface.DEFAULT_BOLD
-        gravity = Gravity.CENTER
-        background = roundedBackground(Color.parseColor("#171717"), 48f)
-        setPadding(24, 24, 24, 24)
-        elevation = 12f
-
-        setOnClickListener {
-          isCollapsed = false
-          saveWidgetPreferences()
-          refreshWidgetAtSamePosition()
-        }
-        setOnTouchListener { view, event ->
-          applyPressFeedback(view, event)
-          false
-        }
-      }
-
-      addView(bButton, LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-      ))
-
-      setOnClickListener {
-        isCollapsed = false
-        saveWidgetPreferences()
-        refreshWidgetAtSamePosition()
-      }
       setOnTouchListener { view, event ->
-        applyPressFeedback(view, event)
-        false
+        val params = this@FloatingWidgetService.layoutParams ?: return@setOnTouchListener true
+
+        when (event.action) {
+          MotionEvent.ACTION_DOWN -> {
+            view.alpha = 0.55f
+            initialX = params.x
+            initialY = params.y
+            initialTouchX = event.rawX
+            initialTouchY = event.rawY
+            true
+          }
+
+          MotionEvent.ACTION_MOVE -> {
+            val dx = event.rawX - initialTouchX
+            val dy = event.rawY - initialTouchY
+            val isDrag = dx < -COLLAPSED_DRAG_SLOP ||
+              dx > COLLAPSED_DRAG_SLOP ||
+              dy < -COLLAPSED_DRAG_SLOP ||
+              dy > COLLAPSED_DRAG_SLOP
+
+            if (isDrag) {
+              params.x = initialX + dx.toInt()
+              params.y = initialY + dy.toInt()
+              windowManager?.updateViewLayout(floatingView, params)
+              saveWidgetPosition(params.x, params.y)
+            }
+
+            true
+          }
+
+          MotionEvent.ACTION_UP -> {
+            view.alpha = 1f
+
+            val dx = event.rawX - initialTouchX
+            val dy = event.rawY - initialTouchY
+            val isTap = dx >= -COLLAPSED_DRAG_SLOP &&
+              dx <= COLLAPSED_DRAG_SLOP &&
+              dy >= -COLLAPSED_DRAG_SLOP &&
+              dy <= COLLAPSED_DRAG_SLOP
+
+            if (isTap) {
+              isCollapsed = false
+              saveWidgetPreferences()
+              refreshWidgetAtSamePosition()
+            }
+
+            true
+          }
+
+          MotionEvent.ACTION_CANCEL -> {
+            view.alpha = 1f
+            true
+          }
+
+          else -> true
+        }
       }
     }
   }
@@ -495,5 +554,6 @@ class FloatingWidgetService : Service() {
     private const val KEY_WIDGET_X = "widget_x"
     private const val KEY_WIDGET_Y = "widget_y"
     private const val COLLAPSED_TAP_SLOP = 96f
+    private const val COLLAPSED_DRAG_SLOP = 18f
   }
 }

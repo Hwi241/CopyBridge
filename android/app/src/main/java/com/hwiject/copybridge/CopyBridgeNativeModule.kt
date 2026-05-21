@@ -1,5 +1,8 @@
 package com.hwiject.copybridge
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -85,4 +88,40 @@ class CopyBridgeNativeModule(
  promise.reject("RESTORE_FLOATING_WIDGET_FAILED", error)
  }
  }
+  @ReactMethod
+  fun getDebugLogs(promise: Promise) {
+    try {
+      val prefs = reactContext.getSharedPreferences("copybridge_debug_logs", Context.MODE_PRIVATE)
+      promise.resolve(prefs.getString("logs", "") ?: "")
+    } catch (error: Exception) {
+      promise.reject("GET_DEBUG_LOGS_FAILED", error)
+    }
+  }
+
+  @ReactMethod
+  fun clearDebugLogs(promise: Promise) {
+    try {
+      val prefs = reactContext.getSharedPreferences("copybridge_debug_logs", Context.MODE_PRIVATE)
+      prefs.edit().remove("logs").apply()
+      Toast.makeText(reactContext, "CopyBridge 로그를 비웠습니다.", Toast.LENGTH_SHORT).show()
+      promise.resolve(true)
+    } catch (error: Exception) {
+      promise.reject("CLEAR_DEBUG_LOGS_FAILED", error)
+    }
+  }
+
+  @ReactMethod
+  fun copyDebugLogs(promise: Promise) {
+    try {
+      val prefs = reactContext.getSharedPreferences("copybridge_debug_logs", Context.MODE_PRIVATE)
+      val logs = prefs.getString("logs", "") ?: ""
+      val clipboard = reactContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+      clipboard.setPrimaryClip(ClipData.newPlainText("CopyBridge Debug Logs", logs))
+      Toast.makeText(reactContext, "CopyBridge 로그를 복사했습니다.", Toast.LENGTH_SHORT).show()
+      promise.resolve(true)
+    } catch (error: Exception) {
+      promise.reject("COPY_DEBUG_LOGS_FAILED", error)
+    }
+  }
+
 }
