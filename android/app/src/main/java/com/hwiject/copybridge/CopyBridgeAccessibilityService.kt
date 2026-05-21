@@ -321,6 +321,17 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     return result.takeLast(MAX_COPY_LINES)
   }
 
+  private fun preferBottomTelegramClusterTexts(
+    texts: List<String>
+  ): List<String> {
+    if (texts.size <= 2) return texts
+    val normalized = texts.map { it.trim() }.filter { it.isNotBlank() }
+    if (normalized.size <= 2) return normalized
+    val selected = normalized.takeLast(2)
+    appendDebugLog("TG\u2192GPT", "TG_FULL_BOTTOM_CLUSTER before=${normalized.size} after=${selected.size} preview=${compactLogPreview(selected.joinToString("\\n"))}")
+    return selected
+  }
+
   private fun collectTelegramFullModeTexts(
     roots: List<AccessibilityNodeInfo>
   ): List<String> {
@@ -941,6 +952,123 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     }
   }
 
+    private fun isTelegramEditActuallyFilled(
+    editNode: AccessibilityNodeInfo?
+  ): Boolean {
+    val value = editNode?.text?.toString()?.trim().orEmpty()
+    if (value.isBlank()) return false
+    val placeholders = setOf("메시지", "Message", "message", "Write a message", "메시지 입력")
+    return !placeholders.contains(value)
+  }
+
+  private fun logTelegramEditSnapshot(
+    label: String,
+    editNode: AccessibilityNodeInfo?
+  ) {
+    val editText = editNode?.text?.toString().orEmpty()
+    val startPreview = compactLogPreview(editText.take(600))
+    val endPreview = compactLogPreview(editText.takeLast(600))
+    appendDebugLog("GPT→TG", "$label editTextLength=${editText.length} start=$startPreview end=$endPreview")
+  }
+
+  private fun logGptCopyButtonCandidates(
+    label: String,
+    copyButtons: List<CopyButtonCandidate>
+  ) {
+    val sorted = copyButtons.sortedWith(compareBy<CopyButtonCandidate> { it.top }.thenBy { it.left })
+    sorted.takeLast(12).forEachIndexed { index, candidate ->
+      appendDebugLog("GPT→TG", "$label candidate[$index] label=${compactLogPreview(candidate.label)} top=${candidate.top} left=${candidate.left} isCode=${candidate.isCodeCopy}")
+    }
+  }
+
+    private fun tapNodeCenterByGesture(
+    node: AccessibilityNodeInfo?,
+    logLabel: String
+  ): Boolean {
+    if (node == null) { appendDebugLog("GPT\u2192TG", "$logLabel gestureTap node=null"); return false }
+    val rect = android.graphics.Rect()
+    node.getBoundsInScreen(rect)
+    if (rect.width() <= 0 || rect.height() <= 0) { appendDebugLog("GPT\u2192TG", "$logLabel gestureTap invalidBounds left=${rect.left} top=${rect.top} right=${rect.right} bottom=${rect.bottom}"); return false }
+    val centerX = rect.centerX().toFloat()
+    val centerY = rect.centerY().toFloat()
+    val path = android.graphics.Path()
+    path.moveTo(centerX, centerY)
+    val gesture = android.accessibilityservice.GestureDescription.Builder()
+      .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0L, 80L))
+      .build()
+    val dispatched = dispatchGesture(gesture, null, null)
+    appendDebugLog("GPT\u2192TG", "$logLabel gestureTap dispatched=$dispatched centerX=${centerX.toInt()} centerY=${centerY.toInt()} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}")
+    return dispatched
+  }
+
+    private fun tryTelegramLongClickPaste(
+    editNode: AccessibilityNodeInfo?
+  ): Boolean {
+    if (editNode == null) return false
+    appendDebugLog("GPT→TG", "CODE_LONG_PASTE start")
+    editNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+    editNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    android.os.SystemClock.sleep(250L)
+    val longClicked = editNode.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+    appendDebugLog("GPT→TG", "CODE_LONG_PASTE longClicked=$longClicked")
+    android.os.SystemClock.sleep(500L)
+    val roots = getTelegramRoots()
+    val pasteCandidates = mutableListOf<AccessibilityNodeInfo>()
+    roots.forEach { root -> collectPasteMenuCandidates(root, pasteCandidates) }
+    appendDebugLog("GPT→TG", "CODE_LONG_PASTE menuCandidates=${pasteCandidates.size}")
+    pasteCandidates.take(8).forEachIndexed { index, candidate -> logPasteMenuCandidate(index, candidate) }
+    val target = pasteCandidates.firstOrNull()
+    if (target == null) { appendDebugLog("GPT→TG", "CODE_LONG_PASTE target=null"); return false }
+    appendDebugLog("GPT→TG", "CODE_LONG_PASTE target=${compactLogPreview(buildNodeLabel(target))}")
+    val clicked = clickNodeOrClickableParent(target)
+    appendDebugLog("GPT→TG", "CODE_LONG_PASTE clicked=$clicked")
+    if (!clicked) return false
+    android.os.SystemClock.sleep(500L)
+    val valid = isTelegramEditActuallyFilled(editNode)
+    appendDebugLog("GPT→TG", "CODE_LONG_PASTE valid=$valid")
+    logTelegramEditSnapshot("CODE_LONG_PASTE_SNAPSHOT", editNode)
+    return valid
+  }
+
+  private fun isExactPasteMenuLabel(
+    label: String
+  ): Boolean {
+    val normalized = label.trim()
+    val lower = normalized.lowercase()
+    if (normalized.length > 20) return false
+    return normalized == "붙여넣기" || lower == "paste"
+  }
+
+  private fun logPasteMenuCandidate(
+    index: Int,
+    node: AccessibilityNodeInfo
+  ) {
+    val label = buildNodeLabel(node)
+    val rect = android.graphics.Rect()
+    node.getBoundsInScreen(rect)
+    appendDebugLog("GPT→TG", "CODE_LONG_PASTE candidate[$index] label=${compactLogPreview(label)} length=${label.length} class=${node.className} clickable=${node.isClickable} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}")
+  }
+
+  private fun collectPasteMenuCandidates(
+    node: AccessibilityNodeInfo?,
+    out: MutableList<AccessibilityNodeInfo>
+  ) {
+    if (node == null) return
+    val label = buildNodeLabel(node).trim()
+    if (isExactPasteMenuLabel(label)) {
+      out.add(node)
+    }
+    for (i in 0 until node.childCount) { collectPasteMenuCandidates(node.getChild(i), out) }
+  }
+
+  private fun buildNodeLabel(node: AccessibilityNodeInfo?): String {
+    if (node == null) return ""
+    val parts = mutableListOf<String>()
+    node.text?.toString()?.let { if (it.isNotBlank()) parts.add(it) }
+    node.contentDescription?.toString()?.let { if (it.isNotBlank()) parts.add(it) }
+    return parts.joinToString(" ").trim()
+  }
+
     private fun tryPasteGptCopyButtonToTelegram(
     gptOutputMode: String,
     aiRoots: List<AccessibilityNodeInfo>,
@@ -949,13 +1077,24 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val copyButtons = mutableListOf<CopyButtonCandidate>()
     aiRoots.forEach { root -> collectGptCopyButtonCandidates(root, copyButtons) }
     appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE candidates=${copyButtons.size} mode=$gptOutputMode")
+    logGptCopyButtonCandidates("COPY_BUTTON_PASTE", copyButtons)
     val target = findBestGptCopyButtonForPaste(gptOutputMode, copyButtons)
     if (target == null) {
       appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE target=null mode=$gptOutputMode")
       return false
     }
     appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE target label=${compactLogPreview(target.label)} top=${target.top} left=${target.left} isCode=${target.isCodeCopy}")
-    val clicked = clickNodeOrClickableParent(target.node)
+    val clicked = if (gptOutputMode == "CODE") {
+      val gestureClicked = tapNodeCenterByGesture(target.node, "CODE_COPY_BUTTON")
+      appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE codeGestureClicked=$gestureClicked")
+      if (gestureClicked) { true } else {
+        val fallbackClicked = clickNodeOrClickableParent(target.node)
+        appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE codeFallbackClick=$fallbackClicked")
+        fallbackClicked
+      }
+    } else {
+      clickNodeOrClickableParent(target.node)
+    }
     appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE clicked=$clicked")
     if (!clicked) return false
     android.os.SystemClock.sleep(900L)
@@ -967,9 +1106,36 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     if (tgEdit == null) return false
     tgEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
     tgEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-    val pasted = try { pasteClipboardToNode(tgEdit) } catch (error: Exception) { appendDebugLog("GPT→TG", "EXCEPTION copyButtonPaste ${error::class.java.simpleName}: ${error.message}"); false }
-    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE pasted=$pasted autoSend=$autoSend")
-    if (!pasted) return false
+    var pasted = try { pasteClipboardToNode(tgEdit) } catch (error: Exception) { appendDebugLog("GPT→TG", "EXCEPTION copyButtonPaste ${error::class.java.simpleName}: ${error.message}"); false }
+    android.os.SystemClock.sleep(300L)
+    var pasteValid = isTelegramEditActuallyFilled(tgEdit)
+    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE pasted=$pasted valid=$pasteValid autoSend=$autoSend")
+    logTelegramEditSnapshot("COPY_BUTTON_PASTE_SNAPSHOT", tgEdit)
+    if (!pasteValid && gptOutputMode == "CODE") {
+      val longPasteValid = tryTelegramLongClickPaste(tgEdit)
+      appendDebugLog("GPT→TG", "CODE_LONG_PASTE result=$longPasteValid")
+      if (longPasteValid) { pasted = true; pasteValid = true }
+    }
+
+    if (!pasteValid && gptOutputMode == "FULL") {
+      appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE skipRetryForFull=true -> fallback")
+      return false
+    }
+
+    if (!pasteValid) {
+      for (attempt in 1..2) {
+        tgEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        tgEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        android.os.SystemClock.sleep(300L)
+        val retryPasted = try { pasteClipboardToNode(tgEdit) } catch (error: Exception) { appendDebugLog("GPT→TG", "EXCEPTION copyButtonPasteRetry attempt=$attempt ${error::class.java.simpleName}: ${error.message}"); false }
+        android.os.SystemClock.sleep(300L)
+        val retryValid = isTelegramEditActuallyFilled(tgEdit)
+        appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE retry=$attempt pasted=$retryPasted valid=$retryValid")
+        logTelegramEditSnapshot("COPY_BUTTON_PASTE_RETRY_${attempt}_SNAPSHOT", tgEdit)
+        if (retryPasted && retryValid) { pasted = true; pasteValid = true; break }
+      }
+    }
+    if (!pasted || !pasteValid) return false
     if (autoSend) { scheduleAutoSendAfterPaste("GPT→TG:$gptOutputMode:copyButtonPaste", tgEdit) } else { Toast.makeText(this, "Telegram 입력창에 넣었습니다.", Toast.LENGTH_SHORT).show() }
     return true
   }
@@ -1267,7 +1433,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   }
 
   private fun clampCopyText(text: String): String {
-    return if (text.length > MAX_COPY_CHARS) text.take(MAX_COPY_CHARS) else text
+    return text.trim()
   }
 
   companion object {
@@ -1276,7 +1442,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     private const val DEBUG_LOG_KEY = "logs"
     private const val MAX_DEBUG_LOG_ENTRIES = 50
     private const val MAX_COPY_LINES = 80
-    private const val MAX_COPY_CHARS = 8000
+    private const val MAX_COPY_CHARS = 50000
     private const val MAX_SINGLE_LINE_LENGTH = 600
     private const val MAX_DEBUG_LINES = 60
     private const val MAX_DEBUG_CHARS = 6000
@@ -1338,8 +1504,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       val selectedTexts = if (copyMode == COPY_MODE_LAST) {
         candidates.takeLast(1).map { it.text }
       } else {
-        val fullTexts = service.collectTelegramFullModeTexts(tgRoots)
-        if (fullTexts.size >= 2 || candidates.size <= 1) {
+        val fullTexts = service.preferBottomTelegramClusterTexts(service.collectTelegramFullModeTexts(tgRoots))
+        if (fullTexts.isNotEmpty()) {
           fullTexts
         } else {
           candidates.map { it.text }
@@ -1454,11 +1620,16 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       var gptCopySource = "unknown"
 
       service.appendDebugLog("GPT\u2192TG", "STEP before copyButton mode=$gptOutputMode")
-      val buttonCopyText = try {
-        service.copyGptOutputByChatGptButton(gptOutputMode, aiRoots)
-      } catch (error: Exception) {
-        service.appendDebugLog("GPT\u2192TG", "EXCEPTION copyButton ${error::class.java.simpleName}: ${error.message}")
+      val buttonCopyText = if (gptOutputMode == "FULL") {
+        service.appendDebugLog("GPT\u2192TG", "STEP skip copyButton polling for FULL fallback")
         null
+      } else {
+        try {
+          service.copyGptOutputByChatGptButton(gptOutputMode, aiRoots)
+        } catch (error: Exception) {
+          service.appendDebugLog("GPT\u2192TG", "EXCEPTION copyButton ${error::class.java.simpleName}: ${error.message}")
+          null
+        }
       }
       service.appendDebugLog("GPT\u2192TG", "STEP after copyButton resultLength=${buttonCopyText?.length ?: -1}")
 
@@ -1496,6 +1667,13 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
         textToSend = service.clampCopyText(selectedCode)
         service.appendDebugLog("GPT\u2192TG", "CODE_FALLBACK textToSendLength=${textToSend.length}")
+        if (textToSend.isBlank()) {
+          val finalTexts = service.collectLatestAiAnswerFallbackTexts(aiRoots)
+          val finalCodeBlocks = service.extractCodeBlocks(finalTexts)
+          val finalFull = if (finalCodeBlocks.isNotEmpty()) { finalCodeBlocks.last().trim() } else { finalTexts.joinToString("\n") }
+          textToSend = service.clampCopyText(finalFull)
+          service.appendDebugLog("GPT\u2192TG", "CODE_FINAL_FALLBACK source=${if (finalCodeBlocks.isNotEmpty()) "codeBlocks" else "fullFallback"} textLength=${textToSend.length}")
+        }
       } else {
         gptCopySource = "fallback_full_visible"
         service.appendDebugLog("GPT\u2192TG", "STEP fallback FULL collect start")

@@ -8,6 +8,7 @@ import android.net.Uri
 import android.provider.Settings
 import android.widget.Toast
 import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
@@ -124,4 +125,49 @@ class CopyBridgeNativeModule(
     }
   }
 
+
+  @ReactMethod
+  fun getOpacitySettings(promise: Promise) {
+    try {
+      val prefs = reactContext.getSharedPreferences("copybridge_floating_widget", Context.MODE_PRIVATE)
+      val widgetOpacity = prefs.getFloat("widget_opacity", 1f)
+      val collapsedOpacity = prefs.getFloat("collapsed_opacity", 0.85f)
+      val map = Arguments.createMap()
+      map.putDouble("widgetOpacity", widgetOpacity.toDouble())
+      map.putDouble("collapsedOpacity", collapsedOpacity.toDouble())
+      promise.resolve(map)
+    } catch (error: Exception) {
+      promise.reject("GET_OPACITY_FAILED", error)
+    }
+  }
+
+  @ReactMethod
+  fun setWidgetOpacity(value: Double, promise: Promise) {
+    try {
+      val prefs = reactContext.getSharedPreferences("copybridge_floating_widget", Context.MODE_PRIVATE)
+      prefs.edit().putFloat("widget_opacity", value.toFloat()).apply()
+      val intent = Intent(reactContext, FloatingWidgetService::class.java).apply {
+        action = FloatingWidgetService.ACTION_REFRESH_WIDGET
+      }
+      reactContext.startService(intent)
+      promise.resolve(value)
+    } catch (error: Exception) {
+      promise.reject("SET_OPACITY_FAILED", error)
+    }
+  }
+
+  @ReactMethod
+  fun setCollapsedOpacity(value: Double, promise: Promise) {
+    try {
+      val prefs = reactContext.getSharedPreferences("copybridge_floating_widget", Context.MODE_PRIVATE)
+      prefs.edit().putFloat("collapsed_opacity", value.toFloat()).apply()
+      val intent = Intent(reactContext, FloatingWidgetService::class.java).apply {
+        action = FloatingWidgetService.ACTION_REFRESH_WIDGET
+      }
+      reactContext.startService(intent)
+      promise.resolve(value)
+    } catch (error: Exception) {
+      promise.reject("SET_COLLAPSED_OPACITY_FAILED", error)
+    }
+  }
 }

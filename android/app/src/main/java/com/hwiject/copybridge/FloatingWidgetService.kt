@@ -37,6 +37,8 @@ class FloatingWidgetService : Service() {
   private var replyCopyModeString: String = "FULL"
   private var gptOutputModeString: String = "CODE"
   private var isCollapsed = false
+  private var widgetOpacity = 1f
+  private var collapsedOpacity = 0.85f
 
   private enum class WidgetSize(
     val label: String,
@@ -64,6 +66,11 @@ class FloatingWidgetService : Service() {
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    if (intent?.action == ACTION_REFRESH_WIDGET) {
+      refreshWidgetAtSamePosition()
+      return START_STICKY
+    }
+
     if (intent?.action == ACTION_RESTORE_WIDGET) {
       restoreExpandedWidget()
       return START_STICKY
@@ -96,6 +103,8 @@ class FloatingWidgetService : Service() {
     replyCopyModeString = prefs.getString(KEY_REPLY_COPY_MODE, "FULL") ?: "FULL"
     gptOutputModeString = prefs.getString(KEY_GPT_OUTPUT_MODE, "CODE") ?: "CODE"
     isCollapsed = prefs.getBoolean(KEY_WIDGET_COLLAPSED, false)
+    widgetOpacity = prefs.getFloat("widget_opacity", 1f)
+    collapsedOpacity = prefs.getFloat("collapsed_opacity", 0.85f)
   }
 
   private fun saveWidgetPreferences() {
@@ -134,6 +143,9 @@ class FloatingWidgetService : Service() {
   }
 
   private fun showFloatingWidget() {
+    val prefs = getSharedPreferences("copybridge_floating_widget", MODE_PRIVATE)
+    widgetOpacity = prefs.getFloat("widget_opacity", 1f).coerceIn(0.35f, 1.0f)
+    collapsedOpacity = prefs.getFloat("collapsed_opacity", 0.85f).coerceIn(0.35f, 1.0f)
     if (floatingView != null) {
       Toast.makeText(this, "CopyBridge 위젯이 이미 실행 중입니다.", Toast.LENGTH_SHORT).show()
       return
@@ -298,6 +310,7 @@ class FloatingWidgetService : Service() {
     panel.addView(gptOutputButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply { bottomMargin = 10 })
     panel.addView(autoSendButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight))
 
+    panel.alpha = widgetOpacity
     panel.setOnTouchListener { _, event -> handleDrag(event); true }
     return panel
   }
@@ -314,6 +327,7 @@ class FloatingWidgetService : Service() {
 
   private fun createCollapsedView(): View {
     return TextView(this).apply {
+      alpha = collapsedOpacity
       text = "B"
       setTextColor(Color.WHITE)
       textSize = 20f
@@ -551,6 +565,7 @@ class FloatingWidgetService : Service() {
     private const val KEY_GPT_OUTPUT_MODE = "gpt_output_mode"
     private const val KEY_WIDGET_COLLAPSED = "widget_collapsed"
     const val ACTION_RESTORE_WIDGET = "com.hwiject.copybridge.RESTORE_WIDGET"
+    const val ACTION_REFRESH_WIDGET = "com.hwiject.copybridge.REFRESH_WIDGET"
     private const val KEY_WIDGET_X = "widget_x"
     private const val KEY_WIDGET_Y = "widget_y"
     private const val COLLAPSED_TAP_SLOP = 96f

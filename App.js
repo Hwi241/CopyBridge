@@ -12,8 +12,12 @@ import {
   View,
 } from 'react-native';
 
+const OPACITY_PRESETS = [1, 0.85, 0.7, 0.55];
+
 export default function App() {
   const [debugLogs, setDebugLogs] = useState('');
+  const [widgetOpacity, setWidgetOpacity] = useState(1);
+  const [collapsedOpacity, setCollapsedOpacity] = useState(0.85);
 
   const getNativeModule = () => NativeModules.CopyBridgeNativeModule;
 
@@ -34,6 +38,30 @@ export default function App() {
       setDebugLogs('\ub85c\uadf8\ub97c \ubd88\ub7ec\uc624\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.');
     }
   }, []);
+
+    const loadOpacitySettings = useCallback(async () => {
+    const nativeModule = getNativeModule();
+    if (Platform.OS !== 'android' || !nativeModule || typeof nativeModule.getOpacitySettings !== 'function') return;
+    try {
+      const settings = await nativeModule.getOpacitySettings();
+      if (settings && typeof settings.widgetOpacity === 'number') setWidgetOpacity(settings.widgetOpacity);
+      if (settings && typeof settings.collapsedOpacity === 'number') setCollapsedOpacity(settings.collapsedOpacity);
+    } catch (error) {}
+  }, []);
+
+  const setWidgetOpacityValue = async (value) => {
+    const nativeModule = getNativeModule();
+    if (!nativeModule || typeof nativeModule.setWidgetOpacity !== 'function') return;
+    try { const next = await nativeModule.setWidgetOpacity(value); setWidgetOpacity(typeof next === 'number' ? next : value); }
+    catch (error) { Alert.alert('설정 실패', '위젯 투명도를 저장하지 못했습니다.'); }
+  };
+
+  const setCollapsedOpacityValue = async (value) => {
+    const nativeModule = getNativeModule();
+    if (!nativeModule || typeof nativeModule.setCollapsedOpacity !== 'function') return;
+    try { const next = await nativeModule.setCollapsedOpacity(value); setCollapsedOpacity(typeof next === 'number' ? next : value); }
+    catch (error) { Alert.alert('설정 실패', '최소화 아이콘 투명도를 저장하지 못했습니다.'); }
+  };
 
   const copyDebugLogs = async () => {
     const nativeModule = getNativeModule();
@@ -64,7 +92,7 @@ export default function App() {
     }
   };
 
-  useEffect(() => { loadDebugLogs(); }, [loadDebugLogs]);
+  useEffect(() => { loadDebugLogs(); loadOpacitySettings(); }, [loadDebugLogs, loadOpacitySettings]);
   const showNextStepAlert = (label) => {
     Alert.alert(
       '다음 단계에서 연결',
@@ -236,7 +264,30 @@ export default function App() {
           
         </View>
 
-        <View style={styles.logCard}>
+        <View style={styles.opacityCard}>
+            <Text style={styles.sectionTitle}>위젯 투명도</Text>
+            <Text style={styles.opacityDescription}>펼쳐진 위젯과 최소화 B 아이콘의 투명도를 따로 조절합니다.</Text>
+
+            <Text style={styles.opacityLabel}>전체 위젯 투명도</Text>
+            <View style={styles.opacityOptions}>
+              {OPACITY_PRESETS.map((value) => (
+                <TouchableOpacity key={`wo-${value}`} style={[styles.opacityOption, Math.abs(widgetOpacity - value) < 0.01 && styles.opacityOptionActive]} activeOpacity={0.8} onPress={() => setWidgetOpacityValue(value)}>
+                  <Text style={[styles.opacityOptionText, Math.abs(widgetOpacity - value) < 0.01 && styles.opacityOptionTextActive]}>{Math.round(value * 100)}%</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <Text style={styles.opacityLabel}>최소화 아이콘 투명도</Text>
+            <View style={styles.opacityOptions}>
+              {OPACITY_PRESETS.map((value) => (
+                <TouchableOpacity key={`co-${value}`} style={[styles.opacityOption, Math.abs(collapsedOpacity - value) < 0.01 && styles.opacityOptionActive]} activeOpacity={0.8} onPress={() => setCollapsedOpacityValue(value)}>
+                  <Text style={[styles.opacityOptionText, Math.abs(collapsedOpacity - value) < 0.01 && styles.opacityOptionTextActive]}>{Math.round(value * 100)}%</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
+          <View style={styles.logCard}>
           <View style={styles.logHeader}>
             <Text style={styles.sectionTitle}>테스트 로그</Text>
             <TouchableOpacity
@@ -514,6 +565,53 @@ const styles = StyleSheet.create({
     color: '#222222',
     fontSize: 16,
     fontWeight: '700',
+  },
+  opacityCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 18,
+    marginBottom: 18,
+    shadowColor: '#000000',
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 3,
+  },
+  opacityDescription: {
+    marginTop: -8,
+    marginBottom: 16,
+    fontSize: 13,
+    lineHeight: 19,
+    color: '#817A70',
+  },
+  opacityLabel: {
+    marginTop: 10,
+    marginBottom: 8,
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#2A2723',
+  },
+  opacityOptions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  opacityOption: {
+    flex: 1,
+    backgroundColor: '#F3F4F6',
+    borderRadius: 12,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  opacityOptionActive: {
+    backgroundColor: '#111111',
+  },
+  opacityOptionText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#555555',
+  },
+  opacityOptionTextActive: {
+    color: '#FFFFFF',
   },
   logCard: {
     backgroundColor: '#FFFFFF',
