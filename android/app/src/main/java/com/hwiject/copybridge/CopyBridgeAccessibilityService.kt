@@ -332,6 +332,507 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     return selected
   }
 
+  private fun saveBridgeStatusForWidget(
+    gptBusy: Boolean? = null,
+    telegramTyping: Boolean? = null
+  ) {
+    val prefs = getSharedPreferences("copybridge_busy_state", MODE_PRIVATE)
+
+    val currentGptBusy = prefs.getBoolean("gpt_busy", false)
+    val currentTelegramTyping = prefs.getBoolean("telegram_typing", false)
+
+    val nextGptBusy = gptBusy ?: currentGptBusy
+    val nextTelegramTyping = telegramTyping ?: currentTelegramTyping
+
+    prefs.edit()
+      .putBoolean("gpt_busy", nextGptBusy)
+      .putBoolean("telegram_typing", nextTelegramTyping)
+      .apply()
+
+    appendDebugLog(
+      "WIDGET",
+      "BUSY_STATUS_SAVE gptBusy=$nextGptBusy telegramTyping=$nextTelegramTyping"
+    )
+
+    try {
+      val intent = android.content.Intent(this, FloatingWidgetService::class.java).apply {
+        action = "com.hwiject.copybridge.REFRESH_WIDGET"
+      }
+      startService(intent)
+    } catch (e: Exception) {
+      appendDebugLog(
+        "WIDGET",
+        "BUSY_STATUS_REFRESH_ERROR ${e.javaClass.simpleName}: ${compactLogPreview(e.message ?: "")}"
+      )
+    }
+  }
+
+  private fun hasExactShortGptBusyNodeForDecision(
+    roots: List<AccessibilityNodeInfo>
+  ): Boolean {
+    val nodes = mutableListOf<AccessibilityNodeInfo>()
+
+    roots.forEach { root ->
+      collectExactShortGptBusyNodesForDecision(root, nodes)
+    }
+
+    val found = nodes.isNotEmpty()
+
+    appendDebugLog(
+      "GPT→TG",
+      "GPT_EXACT_BUSY_MATCH found=$found candidates=${nodes.size}"
+    )
+
+    nodes.take(8).forEachIndexed { index, node ->
+      val label = buildNodeLabel(node).trim()
+      val rect = android.graphics.Rect()
+      node.getBoundsInScreen(rect)
+
+      appendDebugLog(
+        "GPT→TG",
+        "GPT_EXACT_BUSY_NODE[$index] label=${compactLogPreview(label)} class=${node.className} clickable=${node.isClickable} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      )
+    }
+
+    return found
+  }
+
+  private fun collectExactShortGptBusyNodesForDecision(
+    node: AccessibilityNodeInfo?,
+    out: MutableList<AccessibilityNodeInfo>
+  ) {
+    if (node == null) return
+
+    val label = buildNodeLabel(node).trim()
+    val lower = label.lowercase()
+
+    val isExactBusy =
+      label == "중지" ||
+      label == "응답 중지" ||
+      label == "생성 중지" ||
+      lower == "stop" ||
+      lower == "stop generating" ||
+      lower == "stop responding"
+
+    if (label.length <= 30 && isExactBusy) {
+      out.add(node)
+    }
+
+    for (i in 0 until node.childCount) {
+      collectExactShortGptBusyNodesForDecision(node.getChild(i), out)
+    }
+  }
+
+  private fun logGptControlAreaSnapshotForDebug(
+    roots: List<AccessibilityNodeInfo>
+  ): Boolean {
+    appendDebugLog(
+      "GPT→TG",
+      "GPT_CONTROL_SNAPSHOT roots=${roots.size}"
+    )
+
+    val nodes = mutableListOf<AccessibilityNodeInfo>()
+
+    roots.forEach { root ->
+      val rootRect = android.graphics.Rect()
+      root.getBoundsInScreen(rootRect)
+
+      val screenHeight = if (rootRect.height() > 0) {
+        rootRect.height()
+      } else {
+        2400
+      }
+
+      collectBottomControlNodesForDebug(
+        node = root,
+        out = nodes,
+        minY = (screenHeight * 0.60f).toInt()
+      )
+    }
+
+    val deduped = nodes
+      .distinctBy { node ->
+        val rect = android.graphics.Rect()
+        node.getBoundsInScreen(rect)
+        "${buildNodeLabel(node)}|${node.className}|${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      }
+      .take(40)
+
+    deduped.forEachIndexed { index, node ->
+      val label = buildNodeLabel(node)
+      val rect = android.graphics.Rect()
+      node.getBoundsInScreen(rect)
+
+      appendDebugLog(
+        "GPT→TG",
+        "GPT_CONTROL_NODE[$index] label=${compactLogPreview(label)} length=${label.length} class=${node.className} clickable=${node.isClickable} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      )
+    }
+
+    val busyCandidates = deduped.filter { node ->
+      val label = buildNodeLabel(node).trim()
+      val lower = label.lowercase()
+
+      label.length <= 60 && (
+        label == "중지" ||
+        label == "응답 중지" ||
+        label == "생성 중지" ||
+        lower == "stop" ||
+        lower == "stop generating" ||
+        lower == "stop responding"
+      )
+    }
+
+    appendDebugLog(
+      "GPT→TG",
+      "GPT_CONTROL_BUSY_MATCH found=${busyCandidates.isNotEmpty()} candidates=${busyCandidates.size}"
+    )
+
+    return busyCandidates.isNotEmpty()
+  }
+
+  private fun collectBottomControlNodesForDebug(
+    node: AccessibilityNodeInfo?,
+    out: MutableList<AccessibilityNodeInfo>,
+    minY: Int
+  ) {
+    if (node == null) return
+
+    val rect = android.graphics.Rect()
+    node.getBoundsInScreen(rect)
+
+    val label = buildNodeLabel(node).trim()
+
+    val isBottomArea = rect.bottom >= minY
+    val isUsefulLabel = label.isNotBlank() && label.length <= 120
+
+    if (isBottomArea && isUsefulLabel) {
+      out.add(node)
+    }
+
+    for (i in 0 until node.childCount) {
+      collectBottomControlNodesForDebug(node.getChild(i), out, minY)
+    }
+  }
+
+  private fun scanGptBusyIndicatorForDebug(
+    roots: List<AccessibilityNodeInfo>
+  ): Boolean {
+    appendDebugLog(
+      "GPT→TG",
+      "GPT_BUSY_SCAN roots=${roots.size}"
+    )
+
+    val busyCandidates = mutableListOf<AccessibilityNodeInfo>()
+    val copyLikeCandidates = mutableListOf<AccessibilityNodeInfo>()
+
+    roots.forEach { root ->
+      collectGptBusyCandidates(root, busyCandidates)
+      collectGptCopyLikeCandidatesForDebug(root, copyLikeCandidates)
+    }
+
+    val found = busyCandidates.isNotEmpty()
+
+    appendDebugLog(
+      "GPT→TG",
+      "GPT_BUSY_FOUND found=$found candidates=${busyCandidates.size} copyLike=${copyLikeCandidates.size}"
+    )
+
+    appendDebugLog(
+      "GPT→TG",
+      "GPT_COPY_LIKE_COUNT count=${copyLikeCandidates.size}"
+    )
+
+    busyCandidates.take(12).forEachIndexed { index, node ->
+      val label = buildNodeLabel(node)
+      val rect = android.graphics.Rect()
+      node.getBoundsInScreen(rect)
+
+      appendDebugLog(
+        "GPT→TG",
+        "GPT_BUSY_CANDIDATE[$index] label=${compactLogPreview(label)} class=${node.className} clickable=${node.isClickable} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      )
+    }
+
+    copyLikeCandidates.take(12).forEachIndexed { index, node ->
+      val label = buildNodeLabel(node)
+      val rect = android.graphics.Rect()
+      node.getBoundsInScreen(rect)
+
+      appendDebugLog(
+        "GPT→TG",
+        "GPT_COPY_LIKE_CANDIDATE[$index] label=${compactLogPreview(label)} class=${node.className} clickable=${node.isClickable} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      )
+    }
+
+    return found
+  }
+
+  private fun collectGptBusyCandidates(
+    node: AccessibilityNodeInfo?,
+    out: MutableList<AccessibilityNodeInfo>
+  ) {
+    if (node == null) return
+
+    val label = buildNodeLabel(node).trim()
+    val lower = label.lowercase()
+
+    if (
+      label.contains("중지") ||
+      label.contains("응답 중지") ||
+      label.contains("생성 중") ||
+      lower.contains("stop generating") ||
+      lower == "stop" ||
+      lower.contains("generating")
+    ) {
+      out.add(node)
+    }
+
+    for (i in 0 until node.childCount) {
+      collectGptBusyCandidates(node.getChild(i), out)
+    }
+  }
+
+  private fun collectGptCopyLikeCandidatesForDebug(
+    node: AccessibilityNodeInfo?,
+    out: MutableList<AccessibilityNodeInfo>
+  ) {
+    if (node == null) return
+
+    val label = buildNodeLabel(node).trim()
+    val lower = label.lowercase()
+
+    if (
+      label == "복사" ||
+      label == "코드 복사" ||
+      lower == "copy" ||
+      lower.contains("copy code") ||
+      lower.contains("copy")
+    ) {
+      out.add(node)
+    }
+
+    for (i in 0 until node.childCount) {
+      collectGptCopyLikeCandidatesForDebug(node.getChild(i), out)
+    }
+  }
+
+  private fun hasExactTelegramTypingTopBarNodeForDecision(
+    roots: List<AccessibilityNodeInfo>
+  ): Boolean {
+    val nodes = mutableListOf<AccessibilityNodeInfo>()
+
+    roots.forEach { root ->
+      val rootRect = android.graphics.Rect()
+      root.getBoundsInScreen(rootRect)
+
+      val screenHeight = if (rootRect.height() > 0) {
+        rootRect.height()
+      } else {
+        2400
+      }
+
+      collectExactTelegramTypingTopNodesForDecision(
+        node = root,
+        out = nodes,
+        maxY = (screenHeight * 0.18f).toInt()
+      )
+    }
+
+    val found = nodes.isNotEmpty()
+
+    appendDebugLog(
+      "TG→GPT",
+      "TELEGRAM_EXACT_TYPING_MATCH found=$found candidates=${nodes.size}"
+    )
+
+    nodes.take(8).forEachIndexed { index, node ->
+      val label = buildNodeLabel(node).trim()
+      val rect = android.graphics.Rect()
+      node.getBoundsInScreen(rect)
+
+      appendDebugLog(
+        "TG→GPT",
+        "TELEGRAM_EXACT_TYPING_NODE[$index] label=${compactLogPreview(label)} class=${node.className} clickable=${node.isClickable} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      )
+    }
+
+    return found
+  }
+
+  private fun collectExactTelegramTypingTopNodesForDecision(
+    node: AccessibilityNodeInfo?,
+    out: MutableList<AccessibilityNodeInfo>,
+    maxY: Int
+  ) {
+    if (node == null) return
+
+    val rect = android.graphics.Rect()
+    node.getBoundsInScreen(rect)
+
+    val label = buildNodeLabel(node).trim()
+    val lower = label.lowercase()
+
+    val isTopArea = rect.top >= 0 && rect.top <= maxY
+    val isExactTyping =
+      label == "입력 중" ||
+      label.endsWith("입력 중") ||
+      lower == "typing" ||
+      lower.endsWith("typing")
+
+    if (isTopArea && label.length <= 40 && isExactTyping) {
+      out.add(node)
+    }
+
+    for (i in 0 until node.childCount) {
+      collectExactTelegramTypingTopNodesForDecision(node.getChild(i), out, maxY)
+    }
+  }
+
+  private fun logTelegramTopBarSnapshotForDebug(
+    roots: List<AccessibilityNodeInfo>
+  ): Boolean {
+    appendDebugLog(
+      "TG→GPT",
+      "TELEGRAM_TOPBAR_SNAPSHOT roots=${roots.size}"
+    )
+
+    val nodes = mutableListOf<AccessibilityNodeInfo>()
+
+    roots.forEach { root ->
+      val rootRect = android.graphics.Rect()
+      root.getBoundsInScreen(rootRect)
+
+      val screenHeight = if (rootRect.height() > 0) {
+        rootRect.height()
+      } else {
+        2400
+      }
+
+      collectTopAreaNodesForDebug(
+        node = root,
+        out = nodes,
+        maxY = (screenHeight * 0.18f).toInt()
+      )
+    }
+
+    val deduped = nodes
+      .distinctBy { node ->
+        val rect = android.graphics.Rect()
+        node.getBoundsInScreen(rect)
+        "${buildNodeLabel(node)}|${node.className}|${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      }
+      .take(30)
+
+    deduped.forEachIndexed { index, node ->
+      val label = buildNodeLabel(node)
+      val rect = android.graphics.Rect()
+      node.getBoundsInScreen(rect)
+      appendDebugLog(
+        "TG→GPT",
+        "TELEGRAM_TOPBAR_NODE[$index] label=${compactLogPreview(label)} length=${label.length} class=${node.className} clickable=${node.isClickable} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      )
+    }
+
+    val typingCandidates = deduped.filter { node ->
+      val label = buildNodeLabel(node).trim()
+      label.length <= 40 && (
+        label == "입력 중" ||
+        label.contains("입력 중") ||
+        label.lowercase() == "typing" ||
+        label.lowercase().contains("typing")
+      )
+    }
+
+    appendDebugLog(
+      "TG→GPT",
+      "TELEGRAM_TOPBAR_TYPING_MATCH found=${typingCandidates.isNotEmpty()} candidates=${typingCandidates.size}"
+    )
+
+    return typingCandidates.isNotEmpty()
+  }
+
+  private fun collectTopAreaNodesForDebug(
+    node: AccessibilityNodeInfo?,
+    out: MutableList<AccessibilityNodeInfo>,
+    maxY: Int
+  ) {
+    if (node == null) return
+
+    val rect = android.graphics.Rect()
+    node.getBoundsInScreen(rect)
+
+    val label = buildNodeLabel(node).trim()
+
+    val isTopArea = rect.top >= 0 && rect.top <= maxY
+    val isUsefulLabel = label.isNotBlank() && label.length <= 120
+
+    if (isTopArea && isUsefulLabel) {
+      out.add(node)
+    }
+
+    for (i in 0 until node.childCount) {
+      collectTopAreaNodesForDebug(node.getChild(i), out, maxY)
+    }
+  }
+
+  private fun scanTelegramTypingIndicatorForDebug(
+    roots: List<AccessibilityNodeInfo>
+  ): Boolean {
+    appendDebugLog(
+      "TG→GPT",
+      "TELEGRAM_TYPING_SCAN roots=${roots.size}"
+    )
+
+    val candidates = mutableListOf<AccessibilityNodeInfo>()
+
+    roots.forEach { root ->
+      collectTelegramTypingCandidates(root, candidates)
+    }
+
+    val found = candidates.isNotEmpty()
+
+    appendDebugLog(
+      "TG→GPT",
+      "TELEGRAM_TYPING_FOUND found=$found candidates=${candidates.size}"
+    )
+
+    candidates.take(8).forEachIndexed { index, node ->
+      val label = buildNodeLabel(node)
+      val rect = android.graphics.Rect()
+      node.getBoundsInScreen(rect)
+
+      appendDebugLog(
+        "TG→GPT",
+        "TELEGRAM_TYPING_CANDIDATE[$index] label=${compactLogPreview(label)} class=${node.className} clickable=${node.isClickable} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      )
+    }
+
+    return found
+  }
+
+  private fun collectTelegramTypingCandidates(
+    node: AccessibilityNodeInfo?,
+    out: MutableList<AccessibilityNodeInfo>
+  ) {
+    if (node == null) return
+
+    val label = buildNodeLabel(node).trim()
+    val lower = label.lowercase()
+
+    if (
+      label.contains("입력 중") ||
+      lower.contains("typing") ||
+      lower.contains("is typing")
+    ) {
+      out.add(node)
+    }
+
+    for (i in 0 until node.childCount) {
+      collectTelegramTypingCandidates(node.getChild(i), out)
+    }
+  }
+
   private fun collectTelegramFullModeTexts(
     roots: List<AccessibilityNodeInfo>
   ): List<String> {
@@ -1492,6 +1993,47 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         Toast.makeText(context, "Telegram 채팅방을 화면에 열어주세요.", Toast.LENGTH_SHORT).show()
         return false
       }
+      val telegramTypingByTopBar = service.logTelegramTopBarSnapshotForDebug(tgRoots)
+      var telegramTypingDecision = telegramTypingByTopBar
+
+      if (!telegramTypingDecision) {
+        service.appendDebugLog(
+          "TG→GPT",
+          "TELEGRAM_TYPING_RECHECK_START delayMs=300"
+        )
+
+        try {
+          Thread.sleep(300)
+        } catch (_: InterruptedException) {
+        }
+
+        val tgRootsForRecheck = service.getTelegramRoots()
+        val telegramTypingByTopBarRecheck = service.logTelegramTopBarSnapshotForDebug(tgRootsForRecheck)
+        val telegramTypingByExactRecheck = service.hasExactTelegramTypingTopBarNodeForDecision(tgRootsForRecheck)
+
+        telegramTypingDecision = telegramTypingByTopBarRecheck || telegramTypingByExactRecheck
+
+        service.appendDebugLog(
+          "TG→GPT",
+          "TELEGRAM_TYPING_RECHECK topbar=$telegramTypingByTopBarRecheck exact=$telegramTypingByExactRecheck roots=${tgRootsForRecheck.size}"
+        )
+      }
+
+      service.appendDebugLog(
+        "TG→GPT",
+        "TELEGRAM_TYPING_DECISION source=topbar+recheck value=$telegramTypingDecision broadIgnored=true"
+      )
+      service.saveBridgeStatusForWidget(telegramTyping = telegramTypingDecision)
+
+      if (telegramTypingDecision) {
+        service.appendDebugLog(
+          "TG→GPT",
+          "TG_TO_GPT_BLOCKED reason=telegramTyping source=topbar+recheck"
+        )
+        return false
+      }
+
+      service.scanTelegramTypingIndicatorForDebug(tgRoots)
 
       val candidates = service.collectTelegramMessageCandidates(tgRoots)
       if (candidates.isEmpty()) {
@@ -1603,6 +2145,47 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
        val aiRoots = service.getAiRoots()
       service.appendDebugLog("GPT\u2192TG", "STEP aiRoots=${aiRoots.size}")
+      val gptBusyByControlArea = service.logGptControlAreaSnapshotForDebug(aiRoots)
+      var gptBusyDecision = gptBusyByControlArea
+
+      if (!gptBusyDecision) {
+        service.appendDebugLog(
+          "GPT→TG",
+          "GPT_BUSY_RECHECK_START delayMs=300"
+        )
+
+        try {
+          Thread.sleep(300)
+        } catch (_: InterruptedException) {
+        }
+
+        val aiRootsForRecheck = service.getAiRoots()
+        val gptBusyByControlAreaRecheck = service.logGptControlAreaSnapshotForDebug(aiRootsForRecheck)
+        val gptBusyByExactRecheck = service.hasExactShortGptBusyNodeForDecision(aiRootsForRecheck)
+
+        gptBusyDecision = gptBusyByControlAreaRecheck || gptBusyByExactRecheck
+
+        service.appendDebugLog(
+          "GPT→TG",
+          "GPT_BUSY_RECHECK controlArea=$gptBusyByControlAreaRecheck exact=$gptBusyByExactRecheck roots=${aiRootsForRecheck.size}"
+        )
+      }
+
+      service.appendDebugLog(
+        "GPT→TG",
+        "GPT_BUSY_DECISION source=controlArea+recheck value=$gptBusyDecision broadIgnored=true"
+      )
+      service.saveBridgeStatusForWidget(gptBusy = gptBusyDecision)
+
+      if (gptBusyDecision) {
+        service.appendDebugLog(
+          "GPT→TG",
+          "GPT_TO_TG_BLOCKED reason=gptBusy source=controlArea+recheck"
+        )
+        return false
+      }
+
+      service.scanGptBusyIndicatorForDebug(aiRoots)
       if (aiRoots.isEmpty()) {
         service.appendDebugLog("GPT\u2192TG", "STOP aiRoots=0")
         Toast.makeText(context, "GPT/AI 앱을 화면에 열어주세요.", Toast.LENGTH_SHORT).show()

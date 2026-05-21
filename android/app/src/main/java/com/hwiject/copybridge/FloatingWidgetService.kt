@@ -224,6 +224,7 @@ class FloatingWidgetService : Service() {
   }
 
   private fun createWidgetView(): View {
+    val (_, _, bridgeStatusText) = loadBridgeStatusForWidget()
     val size = widgetSize
 
     if (isCollapsed) return createCollapsedView()
@@ -309,6 +310,7 @@ class FloatingWidgetService : Service() {
     panel.addView(tgButton, LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply { bottomMargin = 10 })
     panel.addView(gptOutputButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply { bottomMargin = 10 })
     panel.addView(autoSendButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight))
+    panel.addView(createBridgeStatusTextView(bridgeStatusText))
 
     panel.alpha = widgetOpacity
     panel.setOnTouchListener { _, event -> handleDrag(event); true }
@@ -447,6 +449,45 @@ class FloatingWidgetService : Service() {
         applyPressFeedback(view, event)
         false
       }
+    }
+  }
+
+  private fun loadBridgeStatusForWidget(): Triple<Boolean, Boolean, String> {
+    val prefs = getSharedPreferences("copybridge_busy_state", MODE_PRIVATE)
+    val gptBusy = prefs.getBoolean("gpt_busy", false)
+    val telegramTyping = prefs.getBoolean("telegram_typing", false)
+
+    val statusText = when {
+      gptBusy && telegramTyping -> "\u23F3 \uC791\uC131 \uC911..."
+      gptBusy -> "\u23F3 GPT \uC791\uC131 \uC911..."
+      telegramTyping -> "\u23F3 OpenClaw \uC791\uC131 \uC911..."
+      else -> "\u2705 \uB300\uAE30 \uC911"
+    }
+
+    appendDebugLog(
+      "WIDGET",
+      "WIDGET_STATUS_STATE gptBusy=$gptBusy telegramTyping=$telegramTyping text=$statusText"
+    )
+
+    return Triple(gptBusy, telegramTyping, statusText)
+  }
+
+  private fun createBridgeStatusTextView(statusText: String): TextView {
+    val isReady = statusText[0] == '\u2705'
+
+    return TextView(this).apply {
+      text = statusText
+      textSize = 11f
+      gravity = android.view.Gravity.CENTER
+      setTextColor(
+        if (isReady) {
+          android.graphics.Color.parseColor("#4CAF50")
+        } else {
+          android.graphics.Color.parseColor("#D0A85A")
+        }
+      )
+      alpha = 0.92f
+      setPadding(0, 4, 0, 0)
     }
   }
 
