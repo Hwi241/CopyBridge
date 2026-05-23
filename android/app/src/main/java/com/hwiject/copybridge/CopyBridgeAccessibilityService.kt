@@ -21,7 +21,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   private var lastBridgeMonitorTelegramTyping: Boolean? = null
   private var lastBridgeMonitorGptTextSignature: String? = null
   private var lastBridgeMonitorGptTextChangedAtMs: Long = 0L
-  private val bridgeGptTextChangeHoldMs: Long = 2500L
+  private val bridgeGptTextChangeHoldMs: Long = 6000L
   private var lastBridgeMonitorGptActivityAtMs: Long = 0L
   private var lastBridgeMonitorGptStopSeenAtMs: Long = 0L
   private val bridgeGptRecentStopHoldMs: Long = 10000L
