@@ -19,9 +19,6 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   private var bridgeStatusMonitorRunning = false
   private var lastBridgeMonitorGptBusy: Boolean? = null
   private var lastBridgeMonitorTelegramTyping: Boolean? = null
-  private var lastBridgeMonitorGptDisplayBusy: Boolean? = null
-  private var lastBridgeMonitorGptDisplayBusyTrueAtMs: Long = 0L
-  private val bridgeGptDisplayDelayMs: Long = 2500L
   private var lastBridgeMonitorGptTextSignature: String? = null
   private var lastBridgeMonitorGptTextChangedAtMs: Long = 0L
   private val bridgeGptTextChangeHoldMs: Long = 2500L
@@ -221,6 +218,14 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     }
 
     if (textCandidates.isEmpty()) {
+      if (hasEnoughActionRow) {
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_ACTION_ROW_MATCH found=true fallback=textNotFoundButActionRow candidates=${actionCandidates.size} bottomBand=${bottomBand.size} labels=${uniqueLabels.joinToString("|")}"
+        )
+        return true
+      }
+
       appendDebugLog(
         "GPT→TG",
         "GPT_ACTION_ROW_MATCH found=false reason=noLatestAnswerText candidates=${actionCandidates.size} bottomBand=${bottomBand.size} labels=${uniqueLabels.joinToString("|")}"
@@ -381,49 +386,22 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         gptCompletedByIdleTimeout -> false
         else -> previousGptBusy
       }
-
-      val displayMonitorGptBusy = lastBridgeMonitorGptBusy ?: false
-
-      if (displayMonitorGptBusy) {
-        lastBridgeMonitorGptDisplayBusyTrueAtMs = nowMs
-      }
-
-      val computedDisplayGptBusy =
-        displayMonitorGptBusy ||
-        (
-          !gptCompletedByActionRow &&
-          lastBridgeMonitorGptDisplayBusyTrueAtMs > 0L &&
-          nowMs - lastBridgeMonitorGptDisplayBusyTrueAtMs in 0L..bridgeGptDisplayDelayMs
-          )
-
-      appendDebugLog(
-        "GPT→TG",
-        "GPT_DISPLAY_BUSY actual=$displayMonitorGptBusy display=$computedDisplayGptBusy actionComplete=$gptCompletedByActionRow ageMs=${if (lastBridgeMonitorGptDisplayBusyTrueAtMs > 0L) nowMs - lastBridgeMonitorGptDisplayBusyTrueAtMs else -1}"
-      )
-
-      lastBridgeMonitorGptDisplayBusy = computedDisplayGptBusy
     } else {
       appendDebugLog("WIDGET", "GPT_MONITOR_SKIPPED reason=noGptRoot")
       lastBridgeMonitorGptBusy = false
-      lastBridgeMonitorGptDisplayBusyTrueAtMs = 0L
-      lastBridgeMonitorGptDisplayBusy = false
     }
-
-    val previousDisplayGptBusy = lastBridgeMonitorGptDisplayBusy ?: false
-    val displayGptBusy = lastBridgeMonitorGptDisplayBusy ?: false
 
     val previousTelegramTyping = lastBridgeMonitorTelegramTyping ?: false
 
     val changed = lastBridgeMonitorGptBusy == null || lastBridgeMonitorTelegramTyping == null ||
       previousGptBusy != (lastBridgeMonitorGptBusy ?: false) ||
-      previousDisplayGptBusy != displayGptBusy ||
       previousTelegramTyping != telegramTyping
 
     appendDebugLog("WIDGET", "BRIDGE_MONITOR_TICK roots=${allRoots.size} gptStop=${gptRootsForMonitor.isNotEmpty() && hasExactShortGptBusyNodeForDecision(gptRootsForMonitor)} gptTextChanging=${lastBridgeMonitorGptBusy ?: false} telegramTyping=$telegramTyping")
 
     if (changed) {
       lastBridgeMonitorTelegramTyping = telegramTyping
-      saveBridgeStatusForWidget(gptBusy = displayGptBusy, telegramTyping = telegramTyping)
+      saveBridgeStatusForWidget(gptBusy = lastBridgeMonitorGptBusy, telegramTyping = telegramTyping)
     }  }
 
 override fun onServiceConnected() {
@@ -2682,6 +2660,54 @@ override fun onServiceConnected() {
       return true
     }
 
+  // DEDUP_TELEGRAM_SEND_TEXT_FINAL
+  private fun dedupeTelegramSendTextFinal(raw: String): String {
+    val original = raw.trim()
+    if (original.length < 80) return raw
+
+    fun normalize(value: String): String =
+      value.trim().replace(Regex("\\s+"), " ")
+
+    val rawBlocks =
+      original
+        .split(Regex("\\n\\s*\\n+"))
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+
+    if (rawBlocks.size >= 2 && rawBlocks.size % 2 == 0) {
+      val half = rawBlocks.size / 2
+      val firstHalf = rawBlocks.take(half).map(::normalize)
+      val secondHalf = rawBlocks.drop(half).map(::normalize)
+      if (firstHalf == secondHalf && rawBlocks.take(half).joinToString("\n\n").length >= 80) {
+        return rawBlocks.take(half).joinToString("\n\n").trim()
+      }
+    }
+
+    var blockChanged = false
+    val dedupedBlocks = mutableListOf<String>()
+
+    for (block in rawBlocks) {
+      val prev = dedupedBlocks.lastOrNull()
+      val isAdjacentDuplicate = prev != null && block.length >= 30 && normalize(prev) == normalize(block)
+      if (isAdjacentDuplicate) { blockChanged = true } else { dedupedBlocks.add(block) }
+    }
+
+    val blockText = if (blockChanged) { dedupedBlocks.joinToString("\n\n").trim() } else { original }
+
+    val lines = blockText.lines()
+    val dedupedLines = mutableListOf<String>()
+    var lineChanged = false
+
+    for (line in lines) {
+      val prev = dedupedLines.lastOrNull()
+      val isAdjacentDuplicateLine = prev != null && line.trim().length >= 30 && normalize(prev) == normalize(line)
+      if (isAdjacentDuplicateLine) { lineChanged = true } else { dedupedLines.add(line) }
+    }
+
+    return if (lineChanged) { dedupedLines.joinToString("\n").trim() } else { blockText }
+  }
+
+
     fun requestGptToTelegram(context: Context, gptOutputMode: String, autoSend: Boolean): Boolean {
       val service = activeService
       if (service == null) {
@@ -2824,7 +2850,17 @@ override fun onServiceConnected() {
       // CODE dedupe call removed in 214: restore stable CODE transfer
 
 
-      if (textToSend.isBlank()) {
+      
+      val beforeTelegramFinalDedupeLength = textToSend.length
+      textToSend = dedupeTelegramSendTextFinal(textToSend)
+      if (textToSend.length != beforeTelegramFinalDedupeLength) {
+        service.appendDebugLog(
+          "GPT→TG",
+          "DEDUP_TELEGRAM_SEND_TEXT_FINAL before=$beforeTelegramFinalDedupeLength after=${textToSend.length}"
+        )
+      }
+
+if (textToSend.isBlank()) {
         val debug = service.buildAiWindowDebugInfo("GPT 텍스트를 찾지 못함 (mode=$gptOutputMode)", aiRoots)
         service.copyToClipboard(debug)
         Toast.makeText(context, "GPT 텍스트를 찾지 못했습니다. 진단 정보가 복사되었습니다.", Toast.LENGTH_SHORT).show()
