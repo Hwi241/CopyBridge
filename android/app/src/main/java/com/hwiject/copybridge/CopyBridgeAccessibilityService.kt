@@ -15,9 +15,390 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 
 class CopyBridgeAccessibilityService : AccessibilityService() {
+  private val bridgeStatusMonitorHandler = android.os.Handler(android.os.Looper.getMainLooper())
+  private var bridgeStatusMonitorRunning = false
+  private var lastBridgeMonitorGptBusy: Boolean? = null
+  private var lastBridgeMonitorTelegramTyping: Boolean? = null
+  private var lastBridgeMonitorGptTextSignature: String? = null
+  private var lastBridgeMonitorGptTextChangedAtMs: Long = 0L
+  private val bridgeGptTextChangeHoldMs: Long = 2500L
+  private var lastBridgeMonitorGptActivityAtMs: Long = 0L
+  private var lastBridgeMonitorGptStopSeenAtMs: Long = 0L
+  private val bridgeGptRecentStopHoldMs: Long = 10000L
+  private val bridgeGptIdleCompleteTimeoutMs: Long = 6000L
+  private val bridgeStatusMonitorRunnable = object : Runnable {
+    override fun run() {
+      runBridgeMonitorStatusTick()
+      if (bridgeStatusMonitorRunning) {
+        bridgeStatusMonitorHandler.postDelayed(this, 1000L)
+      }
+    }
+  }
+
   private var lastPackageName: String? = null
 
-  override fun onServiceConnected() {
+    private fun startBridgeStatusMonitor() {
+    if (bridgeStatusMonitorRunning) return
+
+    bridgeStatusMonitorRunning = true
+
+    appendDebugLog(
+      "WIDGET",
+      "BRIDGE_MONITOR_START intervalMs=1000"
+    )
+
+    bridgeStatusMonitorHandler.removeCallbacks(bridgeStatusMonitorRunnable)
+    bridgeStatusMonitorHandler.postDelayed(bridgeStatusMonitorRunnable, 1000L)
+  }
+
+  private fun stopBridgeStatusMonitor() {
+    bridgeStatusMonitorRunning = false
+    bridgeStatusMonitorHandler.removeCallbacks(bridgeStatusMonitorRunnable)
+
+    appendDebugLog(
+      "WIDGET",
+      "BRIDGE_MONITOR_STOP"
+    )
+  }
+
+  private fun collectTelegramMonitorRoots(): List<android.view.accessibility.AccessibilityNodeInfo> {
+    return collectBridgeMonitorRootsWithPackageFilter("telegram", "org.telegram")
+  }
+
+  private fun collectGptMonitorRoots(): List<android.view.accessibility.AccessibilityNodeInfo> {
+    return collectBridgeMonitorRootsWithPackageFilter("openai", "chatgpt")
+  }
+
+  private fun collectBridgeMonitorRootsWithPackageFilter(
+    vararg allowedSubstrings: String
+  ): List<android.view.accessibility.AccessibilityNodeInfo> {
+    val result = mutableListOf<android.view.accessibility.AccessibilityNodeInfo>()
+    val allRoots = collectBridgeMonitorRoots()
+    for (root in allRoots) {
+      try {
+        val pkg = root.packageName?.toString()?.lowercase().orEmpty()
+        if (pkg.isNotEmpty() && allowedSubstrings.any { pkg.contains(it) }) {
+          result.add(root)
+        }
+      } catch (_: Exception) {}
+    }
+    return result
+  }
+
+  private fun collectBridgeMonitorRoots(): List<android.view.accessibility.AccessibilityNodeInfo> {
+    val roots = mutableListOf<android.view.accessibility.AccessibilityNodeInfo>()
+
+    try {
+      rootInActiveWindow?.let { roots.add(it) }
+    } catch (_: Exception) {}
+
+    try {
+      windows.forEach { window ->
+        window.root?.let { root ->
+          if (!roots.any { it == root }) { roots.add(root) }
+        }
+      }
+    } catch (_: Exception) {}
+
+    return roots
+  }
+  private fun getLatestGptAnswerTextSignatureForDecision(
+    roots: List<android.view.accessibility.AccessibilityNodeInfo>
+  ): String {
+    val candidates = mutableListOf<Pair<String, android.graphics.Rect>>()
+
+    roots.forEach { root -> collectGptAnswerTextNodesForDecision(root, candidates) }
+
+    if (candidates.isEmpty()) {
+      appendDebugLog("GPT→TG", "GPT_TEXT_CHANGE_SCAN candidates=0 changed=false active=false ageMs=-1")
+      return ""
+    }
+
+    val sorted = candidates.sortedWith(compareBy<Pair<String, android.graphics.Rect>> { it.second.bottom }.thenBy { it.second.top })
+    val latest = sorted.last()
+    val latestText = latest.first
+    val latestRect = latest.second
+
+    val normalized = latestText.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
+    val signatureCore = if (normalized.length > 220) { normalized.takeLast(220) } else { normalized }
+    val signature = "${latestRect.top}:${latestRect.bottom}:${normalized.length}:$signatureCore"
+
+    candidates.takeLast(5).forEachIndexed { index, item ->
+      val rect = item.second
+      appendDebugLog("GPT→TG", "GPT_TEXT_CHANGE_NODE[$index] length=${item.first.length} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} preview=${compactLogPreview(item.first)}")
+    }
+
+    return signature
+  }
+
+  private fun collectGptAnswerTextNodesForDecision(
+    node: android.view.accessibility.AccessibilityNodeInfo?,
+    out: MutableList<Pair<String, android.graphics.Rect>>
+  ) {
+    if (node == null) return
+
+    val label = buildNodeLabel(node).trim()
+
+    if (label.isNotBlank()) {
+      val rect = android.graphics.Rect()
+      node.getBoundsInScreen(rect)
+
+      val lower = label.lowercase()
+      val isSystemOrOverlay = lower.contains("copybridge") || lower.contains("클립보드") || lower.contains("토스트") ||
+        lower.contains("sktelecom") || lower.contains("오전") || lower.contains("오후") ||
+        lower.contains("위젯") || lower == "bridge" || label.startsWith("CopyBridge") ||
+        label.contains("로그를") || label.contains("복사했습니다")
+
+      val isUiText = label == "복사" || label == "좋은 응답" || label == "별로인 응답" ||
+        label == "소리 내어 읽기" || label == "공유" || label == "더 많은 액션" ||
+        label == "첨부 파일" || label == "ChatGPT에 답장" || label == "음성 받아쓰기" ||
+        label == "음성 대화 시작" || label == "중지" ||
+        lower == "copy" || lower == "like" || lower == "dislike" ||
+        lower == "read aloud" || lower == "share" || lower == "more" ||
+        lower == "stop" || lower == "stop generating" || lower == "stop responding"
+
+      val looksLikeAnswerText = label.length >= 20 && !isUiText && rect.top > 0 && rect.bottom > rect.top && rect.height() >= 20
+
+      if (looksLikeAnswerText) { out.add(label to rect) }
+    }
+
+    for (i in 0 until node.childCount) {
+      collectGptAnswerTextNodesForDecision(node.getChild(i), out)
+    }
+  }
+
+  private fun hasBottomGptCompletionActionRowForDecision(
+    roots: List<android.view.accessibility.AccessibilityNodeInfo>
+  ): Boolean {
+    val actionCandidates = mutableListOf<Pair<String, android.graphics.Rect>>()
+
+    roots.forEach { root ->
+      collectGptCompletionActionNodesForDecision(root, actionCandidates)
+    }
+
+    if (actionCandidates.isEmpty()) {
+      appendDebugLog(
+        "GPT→TG",
+        "GPT_ACTION_ROW_MATCH found=false candidates=0"
+      )
+      return false
+    }
+
+    val maxTop = actionCandidates.maxOf { it.second.top }
+    val bottomBand = actionCandidates.filter { kotlin.math.abs(it.second.top - maxTop) <= 80 }
+    val uniqueLabels = bottomBand.map { it.first }.toSet()
+
+    val hasEnoughActionRow =
+      bottomBand.size >= 3 &&
+      uniqueLabels.intersect(
+        setOf("복사", "좋은 응답", "별로인 응답", "소리 내어 읽기", "공유", "더 많은 액션", "Copy", "Like", "Dislike", "Read aloud", "Share", "More")
+      ).size >= 3
+
+    if (!hasEnoughActionRow) {
+      appendDebugLog(
+        "GPT→TG",
+        "GPT_ACTION_ROW_MATCH found=false reason=insufficientActionRow candidates=${actionCandidates.size} bottomBand=${bottomBand.size} labels=${uniqueLabels.joinToString("|")}"
+      )
+
+      bottomBand.take(8).forEachIndexed { index, item ->
+        val rect = item.second
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_ACTION_ROW_NODE[$index] label=${compactLogPreview(item.first)} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+        )
+      }
+
+      return false
+    }
+
+    val textCandidates = mutableListOf<Pair<String, android.graphics.Rect>>()
+
+    roots.forEach { root ->
+      collectGptAnswerTextNodesForDecision(root, textCandidates)
+    }
+
+    if (textCandidates.isEmpty()) {
+      appendDebugLog(
+        "GPT→TG",
+        "GPT_ACTION_ROW_MATCH found=false reason=noLatestAnswerText candidates=${actionCandidates.size} bottomBand=${bottomBand.size} labels=${uniqueLabels.joinToString("|")}"
+      )
+
+      bottomBand.take(8).forEachIndexed { index, item ->
+        val rect = item.second
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_ACTION_ROW_NODE[$index] label=${compactLogPreview(item.first)} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+        )
+      }
+
+      return false
+    }
+
+    val latestText = textCandidates.maxByOrNull { it.second.bottom }
+    val latestTextRect = latestText?.second ?: android.graphics.Rect()
+    val latestTextPreview = latestText?.first.orEmpty()
+
+    val actionTop = bottomBand.minOf { it.second.top }
+    val actionBottom = bottomBand.maxOf { it.second.bottom }
+    val gap = actionTop - latestTextRect.bottom
+
+    val newerTextBelowAction =
+      latestTextRect.top > actionBottom + 20 ||
+      latestTextRect.bottom > actionBottom + 20
+
+    val actionRowAttachedToLatestAnswer =
+      !newerTextBelowAction &&
+      latestTextRect.bottom > 0 &&
+      actionTop >= latestTextRect.bottom - 20 &&
+      gap <= 420
+
+    appendDebugLog(
+      "GPT→TG",
+      "GPT_ACTION_ROW_RELATION latestBottom=${latestTextRect.bottom} actionTop=$actionTop actionBottom=$actionBottom gap=$gap newerTextBelowAction=$newerTextBelowAction latestPreview=${compactLogPreview(latestTextPreview)}"
+    )
+
+    val found = actionRowAttachedToLatestAnswer
+
+    appendDebugLog(
+      "GPT→TG",
+      if (found) {
+        "GPT_ACTION_ROW_MATCH found=true candidates=${actionCandidates.size} bottomBand=${bottomBand.size} labels=${uniqueLabels.joinToString("|")} relation=latestAnswer"
+      } else {
+        "GPT_ACTION_ROW_MATCH found=false reason=actionRowNotForLatestAnswer candidates=${actionCandidates.size} bottomBand=${bottomBand.size} labels=${uniqueLabels.joinToString("|")}"
+      }
+    )
+
+    bottomBand.take(8).forEachIndexed { index, item ->
+      val rect = item.second
+      appendDebugLog(
+        "GPT→TG",
+        "GPT_ACTION_ROW_NODE[$index] label=${compactLogPreview(item.first)} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      )
+    }
+
+    return found
+  }
+
+  private fun collectGptCompletionActionNodesForDecision(
+    node: android.view.accessibility.AccessibilityNodeInfo?,
+    out: MutableList<Pair<String, android.graphics.Rect>>
+  ) {
+    if (node == null) return
+
+    val label = buildNodeLabel(node).trim()
+    val isAction =
+      label == "복사" || label == "좋은 응답" || label == "별로인 응답" ||
+      label == "소리 내어 읽기" || label == "공유" || label == "더 많은 액션" ||
+      label == "Copy" || label == "Like" || label == "Dislike" ||
+      label == "Read aloud" || label == "Share" || label == "More"
+
+    if (label.length <= 30 && isAction) {
+      val rect = android.graphics.Rect()
+      node.getBoundsInScreen(rect)
+      if (rect.top > 0 && rect.bottom > rect.top) { out.add(label to rect) }
+    }
+
+    for (i in 0 until node.childCount) {
+      collectGptCompletionActionNodesForDecision(node.getChild(i), out)
+    }
+  }
+
+  private fun runBridgeMonitorStatusTick() {
+    val roots = collectBridgeMonitorRoots()
+
+    if (roots.isEmpty()) {
+      appendDebugLog("WIDGET", "BRIDGE_MONITOR_TICK roots=0 skipped=true")
+      return
+    }
+
+    val allRoots = collectBridgeMonitorRoots()
+    val tgRootsForMonitor = collectTelegramMonitorRoots()
+    val gptRootsForMonitor = collectGptMonitorRoots()
+
+    appendDebugLog("WIDGET", "BRIDGE_MONITOR_ROOTS all=${allRoots.size} tg=${tgRootsForMonitor.size} gpt=${gptRootsForMonitor.size}")
+
+    val telegramTyping = if (tgRootsForMonitor.isNotEmpty()) {
+      val tgExact = hasExactTelegramTypingTopBarNodeForDecision(tgRootsForMonitor)
+      val tgTopbar = logTelegramTopBarSnapshotForDebug(tgRootsForMonitor)
+      appendDebugLog("TG→GPT", "TELEGRAM_MONITOR_TYPING_DECISION exact=$tgExact topbar=$tgTopbar value=${tgExact || tgTopbar}")
+      tgExact || tgTopbar
+    } else {
+      appendDebugLog("WIDGET", "TELEGRAM_MONITOR_SKIPPED reason=noTelegramRoot")
+      false
+    }
+
+    val previousGptBusy = lastBridgeMonitorGptBusy ?: false
+
+    if (gptRootsForMonitor.isNotEmpty()) {
+      val gptBusyByStop = hasExactShortGptBusyNodeForDecision(gptRootsForMonitor)
+      val gptCompletedByActionRow = hasBottomGptCompletionActionRowForDecision(gptRootsForMonitor)
+      val nowMs = System.currentTimeMillis()
+      val latestGptTextSignature = getLatestGptAnswerTextSignatureForDecision(gptRootsForMonitor)
+      val previousGptTextSignature = lastBridgeMonitorGptTextSignature
+
+      val gptTextChanged = latestGptTextSignature.isNotBlank() && previousGptTextSignature != null && latestGptTextSignature != previousGptTextSignature
+
+      if (latestGptTextSignature.isNotBlank() && latestGptTextSignature != previousGptTextSignature) {
+        lastBridgeMonitorGptTextSignature = latestGptTextSignature
+        lastBridgeMonitorGptTextChangedAtMs = nowMs
+        lastBridgeMonitorGptActivityAtMs = nowMs
+      }
+
+      val gptTextChangeAgeMs = if (lastBridgeMonitorGptTextChangedAtMs > 0L) { nowMs - lastBridgeMonitorGptTextChangedAtMs } else { -1L }
+
+      if (gptBusyByStop) {
+        lastBridgeMonitorGptStopSeenAtMs = nowMs
+        appendDebugLog("GPT→TG", "GPT_STOP_SEEN updatedAt=$nowMs")
+      }
+
+      val gptTextChangeRecentStopSeen = lastBridgeMonitorGptStopSeenAtMs > 0L && nowMs - lastBridgeMonitorGptStopSeenAtMs <= bridgeGptRecentStopHoldMs
+
+      val gptBusyByTextChange =
+        previousGptBusy && gptTextChangeRecentStopSeen && !gptCompletedByActionRow &&
+        lastBridgeMonitorGptTextChangedAtMs > 0L && gptTextChangeAgeMs in 0L..bridgeGptTextChangeHoldMs
+
+      appendDebugLog("GPT→TG", "GPT_TEXT_CHANGE_SCAN candidates=latest changed=$gptTextChanged active=$gptBusyByTextChange ageMs=$gptTextChangeAgeMs")
+      appendDebugLog("GPT→TG", "GPT_TEXT_CHANGE_GUARD changed=$gptTextChanged previousBusy=$previousGptBusy stop=$gptBusyByStop actionComplete=$gptCompletedByActionRow recentStop=$gptTextChangeRecentStopSeen active=$gptBusyByTextChange")
+
+      if (gptBusyByStop || (gptTextChanged && !gptCompletedByActionRow && gptTextChangeRecentStopSeen)) {
+        lastBridgeMonitorGptActivityAtMs = nowMs
+      }
+
+      val gptIdleAgeMs = if (lastBridgeMonitorGptActivityAtMs > 0L) { nowMs - lastBridgeMonitorGptActivityAtMs } else { -1L }
+      val gptCompletedByIdleTimeout = previousGptBusy && !gptBusyByStop && !gptBusyByTextChange && !gptCompletedByActionRow && gptIdleAgeMs > bridgeGptIdleCompleteTimeoutMs
+
+      if (gptCompletedByIdleTimeout) {
+        appendDebugLog("GPT→TG", "GPT_IDLE_COMPLETE_TIMEOUT active=true ageMs=$gptIdleAgeMs")
+      }
+
+      lastBridgeMonitorGptBusy = when {
+        gptBusyByStop -> true
+        gptCompletedByActionRow -> false
+        gptBusyByTextChange -> true
+        gptCompletedByIdleTimeout -> false
+        else -> previousGptBusy
+      }
+    } else {
+      appendDebugLog("WIDGET", "GPT_MONITOR_SKIPPED reason=noGptRoot")
+      lastBridgeMonitorGptBusy = false
+    }
+
+    val previousTelegramTyping = lastBridgeMonitorTelegramTyping ?: false
+
+    val changed = lastBridgeMonitorGptBusy == null || lastBridgeMonitorTelegramTyping == null ||
+      previousGptBusy != (lastBridgeMonitorGptBusy ?: false) ||
+      previousTelegramTyping != telegramTyping
+
+    appendDebugLog("WIDGET", "BRIDGE_MONITOR_TICK roots=${allRoots.size} gptStop=${gptRootsForMonitor.isNotEmpty() && hasExactShortGptBusyNodeForDecision(gptRootsForMonitor)} gptTextChanging=${lastBridgeMonitorGptBusy ?: false} telegramTyping=$telegramTyping")
+
+    if (changed) {
+      lastBridgeMonitorTelegramTyping = telegramTyping
+      saveBridgeStatusForWidget(gptBusy = lastBridgeMonitorGptBusy, telegramTyping = telegramTyping)
+    }  }
+
+override fun onServiceConnected() {
+    startBridgeStatusMonitor()
+
     super.onServiceConnected()
     activeService = this
     Toast.makeText(this, "CopyBridge 접근성 서비스가 연결되었습니다.", Toast.LENGTH_SHORT).show()
@@ -35,6 +416,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   }
 
   override fun onDestroy() {
+    stopBridgeStatusMonitor()
+
     if (activeService === this) {
       activeService = null
     }
@@ -321,15 +704,72 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     return result.takeLast(MAX_COPY_LINES)
   }
 
+  private fun dedupeCodeTextForTelegramFinal(codeText: String): String {
+    val trimmed = codeText.trim()
+    if (trimmed.length <= 100) return trimmed
+
+    val beforeLength = trimmed.length
+
+    val halfLen = trimmed.length / 2
+    val firstHalf = trimmed.take(halfLen)
+    val secondHalf = trimmed.drop(halfLen - (trimmed.length - halfLen)).take(halfLen)
+
+    if (firstHalf == secondHalf) {
+      appendDebugLog("GPT→TG", "CODE_FINAL_DEDUP_HALF_MATCH removed=true")
+      appendDebugLog("GPT→TG", "CODE_FINAL_DEDUP_DROP preview=${compactLogPreview(firstHalf.take(60))}")
+      val result = trimmed.take(halfLen).trim()
+      appendDebugLog("GPT→TG", "CODE_FINAL_DEDUP beforeLength=$beforeLength afterLength=${result.length}")
+      return result
+    }
+
+    val lines = trimmed.lines()
+    val dedupedLines = mutableListOf<String>()
+    var previousLine = ""
+    for (line in lines) {
+      val trimmedLine = line.trim()
+      if (trimmedLine != previousLine || trimmedLine.isBlank()) {
+        dedupedLines.add(line)
+      }
+      previousLine = trimmedLine
+    }
+
+    val result = dedupedLines.joinToString("\n").trim()
+    appendDebugLog("GPT→TG", "CODE_FINAL_DEDUP beforeLength=$beforeLength afterLength=${result.length}")
+    return result
+  }
+
+  private fun cleanTelegramTextForGptInputFinal(
+    values: List<String>
+  ): List<String> {
+    val beforeLines = values.flatMap { it.lines() }
+
+    val cleaned = values.mapNotNull { value ->
+      val keptLines = value
+        .lines()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .filter { !shouldIgnoreMessageText(it) }
+
+      val joined = keptLines.joinToString("\n").trim()
+      if (joined.isBlank()) null else joined
+    }
+
+    val afterLines = cleaned.flatMap { it.lines() }
+    appendDebugLog("TG→GPT", "TG_FINAL_TEXT_CLEAN beforeLines=${beforeLines.size} afterLines=${afterLines.size}")
+    appendDebugLog("TG→GPT", "TG_FINAL_TEXT_SELECTED count=${cleaned.size} textLength=${cleaned.joinToString("\n\n").length}")
+    return cleaned
+  }
+
   private fun preferBottomTelegramClusterTexts(
     texts: List<String>
   ): List<String> {
     if (texts.size <= 2) return texts
     val normalized = texts.map { it.trim() }.filter { it.isNotBlank() }
     if (normalized.size <= 2) return normalized
-    val selected = normalized.takeLast(2)
-    appendDebugLog("TG\u2192GPT", "TG_FULL_BOTTOM_CLUSTER before=${normalized.size} after=${selected.size} preview=${compactLogPreview(selected.joinToString("\\n"))}")
-    return selected
+    val rawSelected = normalized.takeLast(2)
+    appendDebugLog("TG→GPT", "TG_FULL_BOTTOM_CLUSTER before=${normalized.size} after=${rawSelected.size} preview=${compactLogPreview(rawSelected.joinToString("\\n"))}")
+    val cleaned = cleanTelegramTextForGptInputFinal(rawSelected)
+    return cleaned
   }
 
   private fun saveBridgeStatusForWidget(
@@ -1001,18 +1441,38 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
   private fun shouldIgnoreMessageText(text: String): Boolean {
     val lower = text.lowercase()
+    val trimmed = text.trim()
+
+    if (trimmed.length <= 2) return true
 
     val exactUiTexts = setOf(
       "telegram", "copybridge", "bridge",
-      "메시지", "봇", "봇 메뉴", "돌아가기",
+      "메시지", "뽃", "뽃 메뉴", "돌아가기",
       "안 읽은 메시지", "프로필 사진", "icon 프로필 사진 설정",
-      "이모지, 스티커 및 gif", "미디어 첨부", "음성 메시지 녹음", "옵션 더 보기",
-      "전송: 켬", "전송: 끔",
-      "텔레그램 답변복사", "텔레그램으로 전송"
+      "이메지, 스티커 및 gif", "미디어 첨부", "음성 메시지 녹음", "옵션 더 보기",
+      "전송: 켈", "전송: 끁",
+      "테레그램 답바복사", "테레그램으로 전송"
     )
-
-    if (text.length <= 1) return true
     if (lower in exactUiTexts) return true
+
+    if (trimmed.all { it == '-' || it == '=' || it == '_' || it == '~' || it == '*' }) return true
+
+    val timePat = Regex("^\\s*(\\d{1,2}):(\\d{2})(:(\\d{2}))?\\s*(\\uC624\\uC804|\\uC624\\uD6C4|AM|PM|am|pm)?\\s*$")
+    if (timePat.matches(trimmed)) return true
+
+    val sepPat = Regex("^[\\-\\=\\_\\~\\*\\.\\s]{3,}$")
+    if (sepPat.matches(trimmed)) return true
+
+    val partialIgnores = listOf(
+      "온라인", "오프라인", "접속", "마지막으로 본",
+      "last seen", "online", "offline",
+      "저장한 메시지", "채널", "그룹",
+      "초\\b", "분 전", "시간 전", "일 전",
+      "방금", "조회수", "읽음",
+      "CopyBridge 로그를 클립보드에 복사했습니다",
+      "GPT/TG 전송 테스트 결과가 여기에 누적됩니다"
+    )
+    if (partialIgnores.any { lower.contains(it) }) return true
 
     return false
   }
@@ -1343,7 +1803,6 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     return looksLikeSend
   }
 
-
   private fun copyGptOutputByChatGptButton(
     gptOutputMode: String,
     aiRoots: List<AccessibilityNodeInfo>
@@ -1656,9 +2115,69 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     }
   }
 
+  private fun pickLatestGptAnswerTextForFullFallback(
+    roots: List<android.view.accessibility.AccessibilityNodeInfo>
+  ): String {
+    appendDebugLog("GPT→TG", "GPT_LATEST_ANSWER_PICK_START roots=${roots.size}")
+
+    val actionCandidates = mutableListOf<Pair<String, android.graphics.Rect>>()
+    val textCandidates = mutableListOf<Pair<String, android.graphics.Rect>>()
+
+    roots.forEach { root ->
+      collectGptCompletionActionNodesForDecision(root, actionCandidates)
+      collectGptAnswerTextNodesForDecision(root, textCandidates)
+    }
+
+    if (textCandidates.isEmpty()) {
+      appendDebugLog("GPT→TG", "GPT_LATEST_ANSWER_PICK_FALLBACK reason=noTextCandidates")
+      return ""
+    }
+
+    val actionTop = if (actionCandidates.isNotEmpty()) {
+      val maxTop = actionCandidates.maxOf { it.second.top }
+      val bottomBand = actionCandidates.filter { kotlin.math.abs(it.second.top - maxTop) <= 80 }
+      if (bottomBand.size >= 3) bottomBand.minOf { it.second.top } else Int.MAX_VALUE
+    } else { Int.MAX_VALUE }
+
+    val filteredTexts = textCandidates.filter { item ->
+      val text = item.first.trim()
+      val rect = item.second
+      val isBeforeAction = actionTop == Int.MAX_VALUE || rect.bottom <= actionTop + 40
+      val isUsable = text.length >= 10 && rect.top > 80 && rect.bottom > rect.top &&
+        !text.contains("CopyBridge 로그를 클립보드") &&
+        !text.contains("SKTelecom") && !text.contains("신호가 강합니다") &&
+        text != "CopyBridge CopyBridge"
+      isBeforeAction && isUsable
+    }
+
+    if (filteredTexts.isEmpty()) {
+      appendDebugLog("GPT→TG", "GPT_LATEST_ANSWER_PICK_FALLBACK reason=noFilteredTextCandidates actionTop=$actionTop textCandidates=${textCandidates.size}")
+      return ""
+    }
+
+    val latestBottom = filteredTexts.maxOf { it.second.bottom }
+    val latestBand = filteredTexts.filter { kotlin.math.abs(it.second.bottom - latestBottom) <= 900 }.sortedBy { it.second.top }
+    val selected = latestBand.joinToString("\n\n") { it.first.trim() }.trim()
+
+    appendDebugLog("GPT→TG", "GPT_LATEST_ANSWER_PICK actionTop=$actionTop textCandidates=${textCandidates.size} filtered=${filteredTexts.size} selected=${latestBand.size}")
+
+    latestBand.takeLast(6).forEachIndexed { index, item ->
+      val rect = item.second
+      appendDebugLog("GPT→TG", "GPT_LATEST_ANSWER_PICK_NODE[$index] length=${item.first.length} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} preview=${compactLogPreview(item.first)}")
+    }
+
+    appendDebugLog("GPT→TG", "GPT_LATEST_ANSWER_PICK_SELECTED textLength=${selected.length}")
+    return selected
+  }
+
   private fun collectLatestAiAnswerFallbackTexts(
     roots: List<AccessibilityNodeInfo>
   ): List<String> {
+    val latestPickedText = pickLatestGptAnswerTextForFullFallback(roots)
+    if (latestPickedText.isNotBlank()) {
+      return listOf(latestPickedText)
+    }
+
     val copyButtons = mutableListOf<CopyButtonCandidate>()
     roots.forEach { root ->
       collectGptCopyButtonCandidates(root, copyButtons)
@@ -2203,16 +2722,18 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       var gptCopySource = "unknown"
 
       service.appendDebugLog("GPT\u2192TG", "STEP before copyButton mode=$gptOutputMode")
-      val buttonCopyText = if (gptOutputMode == "FULL") {
-        service.appendDebugLog("GPT\u2192TG", "STEP skip copyButton polling for FULL fallback")
+            val buttonCopyText = try {
+        service.appendDebugLog(
+          "GPT\u2192TG",
+          "STEP try copyButton polling for FULL"
+        )
+        service.copyGptOutputByChatGptButton(gptOutputMode, aiRoots)
+      } catch (error: Exception) {
+        service.appendDebugLog(
+          "GPT\u2192TG",
+          "EXCEPTION copyButton ${error::class.java.simpleName}: ${error.message}"
+        )
         null
-      } else {
-        try {
-          service.copyGptOutputByChatGptButton(gptOutputMode, aiRoots)
-        } catch (error: Exception) {
-          service.appendDebugLog("GPT\u2192TG", "EXCEPTION copyButton ${error::class.java.simpleName}: ${error.message}")
-          null
-        }
       }
       service.appendDebugLog("GPT\u2192TG", "STEP after copyButton resultLength=${buttonCopyText?.length ?: -1}")
 
@@ -2257,6 +2778,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
           textToSend = service.clampCopyText(finalFull)
           service.appendDebugLog("GPT\u2192TG", "CODE_FINAL_FALLBACK source=${if (finalCodeBlocks.isNotEmpty()) "codeBlocks" else "fullFallback"} textLength=${textToSend.length}")
         }
+          // CODE_EMPTY_FALLBACK removed in 214: restore stable transfer flow
+
       } else {
         gptCopySource = "fallback_full_visible"
         service.appendDebugLog("GPT\u2192TG", "STEP fallback FULL collect start")
@@ -2268,6 +2791,9 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         )
         textToSend = service.clampCopyText(fullText)
       }
+      // CODE dedupe call removed in 214: restore stable CODE transfer
+
+
       if (textToSend.isBlank()) {
         val debug = service.buildAiWindowDebugInfo("GPT 텍스트를 찾지 못함 (mode=$gptOutputMode)", aiRoots)
         service.copyToClipboard(debug)
