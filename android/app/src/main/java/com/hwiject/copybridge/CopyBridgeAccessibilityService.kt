@@ -19,6 +19,9 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   private var bridgeStatusMonitorRunning = false
   private var lastBridgeMonitorGptBusy: Boolean? = null
   private var lastBridgeMonitorTelegramTyping: Boolean? = null
+  private var lastBridgeMonitorGptDisplayBusy: Boolean? = null
+  private var lastBridgeMonitorGptDisplayBusyTrueAtMs: Long = 0L
+  private val bridgeGptDisplayDelayMs: Long = 2500L
   private var lastBridgeMonitorGptTextSignature: String? = null
   private var lastBridgeMonitorGptTextChangedAtMs: Long = 0L
   private val bridgeGptTextChangeHoldMs: Long = 2500L
@@ -378,22 +381,49 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         gptCompletedByIdleTimeout -> false
         else -> previousGptBusy
       }
+
+      val displayMonitorGptBusy = lastBridgeMonitorGptBusy ?: false
+
+      if (displayMonitorGptBusy) {
+        lastBridgeMonitorGptDisplayBusyTrueAtMs = nowMs
+      }
+
+      val computedDisplayGptBusy =
+        displayMonitorGptBusy ||
+        (
+          !gptCompletedByActionRow &&
+          lastBridgeMonitorGptDisplayBusyTrueAtMs > 0L &&
+          nowMs - lastBridgeMonitorGptDisplayBusyTrueAtMs in 0L..bridgeGptDisplayDelayMs
+          )
+
+      appendDebugLog(
+        "GPT→TG",
+        "GPT_DISPLAY_BUSY actual=$displayMonitorGptBusy display=$computedDisplayGptBusy actionComplete=$gptCompletedByActionRow ageMs=${if (lastBridgeMonitorGptDisplayBusyTrueAtMs > 0L) nowMs - lastBridgeMonitorGptDisplayBusyTrueAtMs else -1}"
+      )
+
+      lastBridgeMonitorGptDisplayBusy = computedDisplayGptBusy
     } else {
       appendDebugLog("WIDGET", "GPT_MONITOR_SKIPPED reason=noGptRoot")
       lastBridgeMonitorGptBusy = false
+      lastBridgeMonitorGptDisplayBusyTrueAtMs = 0L
+      lastBridgeMonitorGptDisplayBusy = false
     }
+
+    val previousDisplayGptBusy = lastBridgeMonitorGptDisplayBusy ?: false
+    val displayGptBusy = lastBridgeMonitorGptDisplayBusy ?: false
 
     val previousTelegramTyping = lastBridgeMonitorTelegramTyping ?: false
 
     val changed = lastBridgeMonitorGptBusy == null || lastBridgeMonitorTelegramTyping == null ||
       previousGptBusy != (lastBridgeMonitorGptBusy ?: false) ||
+      previousDisplayGptBusy != displayGptBusy ||
       previousTelegramTyping != telegramTyping
 
     appendDebugLog("WIDGET", "BRIDGE_MONITOR_TICK roots=${allRoots.size} gptStop=${gptRootsForMonitor.isNotEmpty() && hasExactShortGptBusyNodeForDecision(gptRootsForMonitor)} gptTextChanging=${lastBridgeMonitorGptBusy ?: false} telegramTyping=$telegramTyping")
 
     if (changed) {
       lastBridgeMonitorTelegramTyping = telegramTyping
-      saveBridgeStatusForWidget(gptBusy = lastBridgeMonitorGptBusy, telegramTyping = telegramTyping)
+      saveBridgeStatusForWidget(gptBusy = displayGptBusy, telegramTyping = telegramTyping)
     }  }
 
 override fun onServiceConnected() {
