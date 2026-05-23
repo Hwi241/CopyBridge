@@ -224,15 +224,22 @@ class FloatingWidgetService : Service() {
   }
 
   private fun createWidgetView(): View {
-    val (_, _, bridgeStatusText) = loadBridgeStatusForWidget()
+    val (gptBusy, telegramTyping, bridgeStatusText) = loadBridgeStatusForWidget()
+    val isBridgeBusy = gptBusy || telegramTyping
     val size = widgetSize
 
     if (isCollapsed) return createCollapsedView()
 
+    val widgetBackgroundColor = if (isBridgeBusy) { Color.WHITE } else { Color.parseColor("#171717") }
+    val widgetPrimaryTextColor = if (isBridgeBusy) { Color.parseColor("#171717") } else { Color.WHITE }
+    val widgetSecondaryTextColor = if (isBridgeBusy) { Color.parseColor("#585858") } else { Color.argb(220, 255, 255, 255) }
+
+    appendDebugLog("WIDGET", "WIDGET_STYLE_STATE busy=$isBridgeBusy background=${if (isBridgeBusy) "light" else "dark"}")
+
     val panel = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
       setPadding(size.panelPaddingHorizontal, size.panelPaddingTop, size.panelPaddingHorizontal, size.panelPaddingBottom)
-      background = roundedBackground(Color.parseColor("#171717"), 18f)
+      background = roundedBackground(widgetBackgroundColor, 18f)
       elevation = 12f
     }
 
@@ -246,7 +253,7 @@ class FloatingWidgetService : Service() {
     }
 
     val title = TextView(this).apply {
-      text = "Bridge"; setTextColor(Color.WHITE); textSize = size.titleTextSize
+      text = "Bridge"; setTextColor(widgetPrimaryTextColor); textSize = size.titleTextSize
       typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER_VERTICAL
     }
 
