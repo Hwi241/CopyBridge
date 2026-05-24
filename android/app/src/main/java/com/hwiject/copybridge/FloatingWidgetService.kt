@@ -20,6 +20,11 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Locale
+import kotlin.concurrent.thread
+import org.json.JSONObject
 
 class FloatingWidgetService : Service() {
   private var windowManager: WindowManager? = null
@@ -39,6 +44,19 @@ class FloatingWidgetService : Service() {
   private var isCollapsed = false
   private var widgetOpacity = 1f
   private var collapsedOpacity = 0.85f
+
+  private val apiBalanceHandler = Handler(Looper.getMainLooper())
+  private var apiBalanceTextView: TextView? = null
+  private var apiBalanceBoxView: TextView? = null
+  private var apiBalanceText = "$" + "KEY"
+  private var apiBalanceRefreshing = false
+  private val apiBalanceHistory = mutableListOf<Pair<Long, Double>>()
+  private val apiBalanceRunnable = object : Runnable {
+    override fun run() {
+      refreshDeepSeekBalance()
+      apiBalanceHandler.postDelayed(this, API_BALANCE_REFRESH_INTERVAL_MS)
+    }
+  }
 
   private enum class WidgetSize(
     val label: String,
@@ -91,6 +109,7 @@ class FloatingWidgetService : Service() {
   }
 
   override fun onDestroy() {
+    apiBalanceHandler.removeCallbacks(apiBalanceRunnable)
     removeFloatingWidget()
     super.onDestroy()
   }
@@ -101,7 +120,10 @@ class FloatingWidgetService : Service() {
     widgetSize = WidgetSize.entries.firstOrNull { it.label == savedSizeLabel } ?: WidgetSize.SMALL
     autoSendEnabled = prefs.getBoolean(KEY_AUTO_SEND_ENABLED, false)
     replyCopyModeString = prefs.getString(KEY_REPLY_COPY_MODE, "FULL") ?: "FULL"
-    gptOutputModeString = prefs.getString(KEY_GPT_OUTPUT_MODE, "CODE") ?: "CODE"
+    gptOutputModeString = "CODE"
+    if (prefs.getString(KEY_GPT_OUTPUT_MODE, "CODE") != "CODE") {
+      prefs.edit().putString(KEY_GPT_OUTPUT_MODE, "CODE").apply()
+    }
     isCollapsed = prefs.getBoolean(KEY_WIDGET_COLLAPSED, false)
     widgetOpacity = prefs.getFloat("widget_opacity", 1f)
     collapsedOpacity = prefs.getFloat("collapsed_opacity", 0.85f)
@@ -113,7 +135,7 @@ class FloatingWidgetService : Service() {
       .putString(KEY_WIDGET_SIZE, widgetSize.label)
       .putBoolean(KEY_AUTO_SEND_ENABLED, autoSendEnabled)
       .putString(KEY_REPLY_COPY_MODE, replyCopyModeString)
-      .putString(KEY_GPT_OUTPUT_MODE, gptOutputModeString)
+      .putString(KEY_GPT_OUTPUT_MODE, "CODE")
       .putBoolean(KEY_WIDGET_COLLAPSED, isCollapsed)
       .apply()
   }
@@ -178,6 +200,7 @@ class FloatingWidgetService : Service() {
     try {
       windowManager?.addView(widgetView, params)
       Toast.makeText(this, "CopyBridge 위젯을 시작했습니다.", Toast.LENGTH_SHORT).show()
+      startDeepSeekBalanceAutoRefresh()
     } catch (_: Exception) {
       floatingView = null
       layoutParams = null
@@ -196,6 +219,8 @@ class FloatingWidgetService : Service() {
     } finally {
       floatingView = null
       layoutParams = null
+      apiBalanceTextView = null
+      apiBalanceBoxView = null
     }
   }
 
@@ -257,6 +282,10 @@ class FloatingWidgetService : Service() {
       typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER_VERTICAL
     }
 
+    val refreshButton = createHeaderButton("↻") {
+      refreshDeepSeekBalance(force = true)
+    }
+
     val sizeButton = createHeaderButton(size.label) { cycleWidgetSize() }
     val closeButton = createHeaderButton("×") {
       Toast.makeText(this, "CopyBridge 위젯을 종료합니다.", Toast.LENGTH_SHORT).show(); stopSelf()
@@ -264,6 +293,7 @@ class FloatingWidgetService : Service() {
 
     header.addView(collapseButton, LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize).apply { rightMargin = 8 })
     header.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+    header.addView(refreshButton, LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize).apply { rightMargin = 8 })
     header.addView(sizeButton, LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize).apply { rightMargin = 8 })
     header.addView(closeButton, LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize))
 
@@ -273,10 +303,12 @@ class FloatingWidgetService : Service() {
       saveWidgetPreferences(); refreshWidgetAtSamePosition()
     }
 
-    val gptOutputLabel = if (gptOutputModeString == "FULL") "GPT: 전체" else "GPT: 코드"
+    val gptOutputLabel = "GPT: 코드"
     val gptOutputButton = createDarkButton(gptOutputLabel, size.buttonTextSize) {
-      gptOutputModeString = if (gptOutputModeString == "FULL") "CODE" else "FULL"
-      saveWidgetPreferences(); refreshWidgetAtSamePosition()
+      gptOutputModeString = "CODE"
+      saveWidgetPreferences()
+      Toast.makeText(this, "GPT 전체 모드는 비활성화되었습니다. 코드 모드로 전송합니다.", Toast.LENGTH_SHORT).show()
+      refreshWidgetAtSamePosition()
     }
 
     val autoSendLabel = if (autoSendEnabled) "전송: 켬" else "전송: 끔"
@@ -306,12 +338,20 @@ class FloatingWidgetService : Service() {
       CopyBridgeAccessibilityService.requestTelegramToGpt(this, replyCopyModeString, autoSendEnabled)
     }
 
+    val apiBalanceBox = createApiBalanceBox(size.buttonTextSize)
+    apiBalanceBoxView = apiBalanceBox
+    apiBalanceTextView = apiBalanceBox
+    updateApiBalanceBoxText()
+
     val tgButton = createTelegramBlueButton("텔레그램으로 보내기", size.buttonTextSize) {
-            appendDebugLog("WIDGET", "tap 텔레그램으로 보내기 gptMode=$gptOutputModeString autoSend=$autoSendEnabled")
-      CopyBridgeAccessibilityService.requestGptToTelegram(this, gptOutputModeString, autoSendEnabled)
+      gptOutputModeString = "CODE"
+      saveWidgetPreferences()
+      appendDebugLog("WIDGET", "tap 텔레그램으로 보내기 gptMode=CODE autoSend=$autoSendEnabled")
+      CopyBridgeAccessibilityService.requestGptToTelegram(this, "CODE", autoSendEnabled)
     }
 
     panel.addView(header, LinearLayout.LayoutParams(size.contentWidth, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 10 })
+    panel.addView(apiBalanceBox, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply { bottomMargin = 10 })
     panel.addView(gptButton, LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply { bottomMargin = 10 })
     panel.addView(replyCopyButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply { bottomMargin = 10 })
     panel.addView(tgButton, LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply { bottomMargin = 10 })
@@ -441,6 +481,166 @@ class FloatingWidgetService : Service() {
     }
 
     Toast.makeText(this, "위젯을 복원했습니다.", Toast.LENGTH_SHORT).show()
+  }
+
+
+  private fun createApiBalanceBox(
+    textSizeValue: Float
+  ): TextView {
+    return TextView(this).apply {
+      text = apiBalanceText
+      setTextColor(Color.parseColor("#FACC15"))
+      textSize = textSizeValue
+      typeface = Typeface.DEFAULT_BOLD
+      gravity = Gravity.CENTER
+      background = roundedBackground(Color.parseColor("#242424"), 12f)
+      setPadding(8, 0, 8, 0)
+      minHeight = 0
+      minimumHeight = 0
+      includeFontPadding = false
+    }
+  }
+
+  private fun updateApiBalanceBoxText() {
+    apiBalanceTextView?.text = apiBalanceText
+  }
+
+  private fun startDeepSeekBalanceAutoRefresh() {
+    apiBalanceHandler.removeCallbacks(apiBalanceRunnable)
+    refreshDeepSeekBalance()
+    apiBalanceHandler.postDelayed(apiBalanceRunnable, API_BALANCE_REFRESH_INTERVAL_MS)
+  }
+
+  private fun refreshDeepSeekBalance(force: Boolean = false) {
+    if (apiBalanceRefreshing && !force) return
+
+    val prefs = getSharedPreferences("copybridge_deepseek_settings", MODE_PRIVATE)
+    val apiKey = prefs.getString("deepseek_api_key", "") ?: ""
+
+    if (apiKey.isBlank()) {
+      apiBalanceText = "$" + "KEY"
+      apiBalanceHistory.clear()
+      updateApiBalanceBoxText()
+      return
+    }
+
+    apiBalanceRefreshing = true
+    apiBalanceText = "$" + "..."
+    updateApiBalanceBoxText()
+
+    thread {
+      var connection: HttpURLConnection? = null
+
+      try {
+        val url = URL("https://api.deepseek.com/user/balance")
+        connection = (url.openConnection() as HttpURLConnection).apply {
+          requestMethod = "GET"
+          connectTimeout = 10000
+          readTimeout = 10000
+          setRequestProperty("Accept", "application/json")
+          setRequestProperty("Authorization", "Bearer $apiKey")
+        }
+
+        val responseCode = connection.responseCode
+        val stream = if (responseCode in 200..299) {
+          connection.inputStream
+        } else {
+          connection.errorStream
+        }
+
+        val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+
+        if (responseCode !in 200..299) {
+          apiBalanceHandler.post {
+            apiBalanceRefreshing = false
+            apiBalanceText = "$" + "ERR"
+            updateApiBalanceBoxText()
+          }
+          return@thread
+        }
+
+        val balance = parseDeepSeekUsdBalance(body)
+        val displayText = String.format(Locale.US, "%.2f", balance)
+
+        apiBalanceHandler.post {
+          apiBalanceRefreshing = false
+          val shouldBlink = shouldBlinkApiBalanceWarning(balance)
+          apiBalanceText = "$" + displayText
+          updateApiBalanceBoxText()
+          if (shouldBlink) blinkApiBalanceBox()
+        }
+      } catch (_: Exception) {
+        apiBalanceHandler.post {
+          apiBalanceRefreshing = false
+          apiBalanceText = "$" + "ERR"
+          updateApiBalanceBoxText()
+        }
+      } finally {
+        connection?.disconnect()
+      }
+    }
+  }
+
+  private fun parseDeepSeekUsdBalance(body: String): Double {
+    val json = JSONObject(body)
+    val balanceInfos = json.optJSONArray("balance_infos") ?: return 0.0
+
+    var fallbackBalance = 0.0
+
+    for (index in 0 until balanceInfos.length()) {
+      val item = balanceInfos.optJSONObject(index) ?: continue
+      val currency = item.optString("currency", "")
+      val totalBalanceString = item.optString("total_balance", "")
+      val balance = totalBalanceString.toDoubleOrNull() ?: 0.0
+
+      if (index == 0) fallbackBalance = balance
+
+      if (currency.uppercase(Locale.US) == "USD") {
+        return balance
+      }
+    }
+
+    return fallbackBalance
+  }
+
+  private fun shouldBlinkApiBalanceWarning(currentBalance: Double): Boolean {
+    val now = System.currentTimeMillis()
+    apiBalanceHistory.add(now to currentBalance)
+    apiBalanceHistory.removeAll { now - it.first > API_BALANCE_HISTORY_WINDOW_MS }
+
+    val current = apiBalanceHistory.lastOrNull() ?: return false
+    val fiveMinutesAgo = apiBalanceHistory.lastOrNull { now - it.first >= API_BALANCE_RECENT_WINDOW_MS } ?: return false
+    val tenMinutesAgo = apiBalanceHistory.lastOrNull { now - it.first >= API_BALANCE_HISTORY_WINDOW_MS } ?: return false
+
+    val recentUsage = (fiveMinutesAgo.second - current.second).coerceAtLeast(0.0)
+    val previousUsage = (tenMinutesAgo.second - fiveMinutesAgo.second).coerceAtLeast(0.0)
+
+    if (previousUsage <= 0.0) return false
+    return recentUsage > previousUsage * API_BALANCE_WARNING_MULTIPLIER
+  }
+
+  private fun blinkApiBalanceBox() {
+    val box = apiBalanceBoxView ?: return
+    val normalBackground = roundedBackground(Color.parseColor("#242424"), 12f)
+    val warningBackground = roundedBackground(Color.parseColor("#B91C1C"), 12f)
+
+    var count = 0
+    val blinkRunnable = object : Runnable {
+      override fun run() {
+        if (apiBalanceBoxView == null) return
+
+        box.background = if (count % 2 == 0) warningBackground else normalBackground
+        count += 1
+
+        if (count < API_BALANCE_BLINK_COUNT) {
+          apiBalanceHandler.postDelayed(this, API_BALANCE_BLINK_INTERVAL_MS)
+        } else {
+          box.background = normalBackground
+        }
+      }
+    }
+
+    apiBalanceHandler.post(blinkRunnable)
   }
 
   private fun createHeaderButton(label: String, onClick: () -> Unit): TextView {
@@ -618,5 +818,11 @@ class FloatingWidgetService : Service() {
     private const val KEY_WIDGET_Y = "widget_y"
     private const val COLLAPSED_TAP_SLOP = 96f
     private const val COLLAPSED_DRAG_SLOP = 18f
+    private const val API_BALANCE_REFRESH_INTERVAL_MS = 60_000L
+    private const val API_BALANCE_RECENT_WINDOW_MS = 5 * 60_000L
+    private const val API_BALANCE_HISTORY_WINDOW_MS = 10 * 60_000L
+    private const val API_BALANCE_WARNING_MULTIPLIER = 1.5
+    private const val API_BALANCE_BLINK_INTERVAL_MS = 500L
+    private const val API_BALANCE_BLINK_COUNT = 6
   }
 }

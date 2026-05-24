@@ -8,6 +8,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -18,6 +19,9 @@ export default function App() {
   const [debugLogs, setDebugLogs] = useState('');
   const [widgetOpacity, setWidgetOpacity] = useState(1);
   const [collapsedOpacity, setCollapsedOpacity] = useState(0.85);
+  const [deepSeekApiKey, setDeepSeekApiKey] = useState('');
+  const [deepSeekKeyStatus, setDeepSeekKeyStatus] = useState('$KEY');
+  const [deepSeekBalanceStatus, setDeepSeekBalanceStatus] = useState('$KEY');
 
   const getNativeModule = () => NativeModules.CopyBridgeNativeModule;
 
@@ -48,6 +52,76 @@ export default function App() {
       if (settings && typeof settings.collapsedOpacity === 'number') setCollapsedOpacity(settings.collapsedOpacity);
     } catch (error) {}
   }, []);
+
+  const loadDeepSeekSettings = useCallback(async () => {
+    const nativeModule = getNativeModule();
+    if (Platform.OS !== 'android' || !nativeModule || typeof nativeModule.getDeepSeekApiKeyStatus !== 'function') {
+      setDeepSeekKeyStatus('$KEY');
+      setDeepSeekBalanceStatus('$KEY');
+      return;
+    }
+    try {
+      const status = await nativeModule.getDeepSeekApiKeyStatus();
+      if (status?.hasKey) {
+        setDeepSeekKeyStatus(status.maskedKey || '저장됨');
+        setDeepSeekBalanceStatus('$...');
+      } else {
+        setDeepSeekKeyStatus('$KEY');
+        setDeepSeekBalanceStatus('$KEY');
+      }
+    } catch (error) {
+      setDeepSeekKeyStatus('$KEY');
+      setDeepSeekBalanceStatus('$KEY');
+    }
+  }, []);
+
+  const saveDeepSeekApiKey = async () => {
+    const nativeModule = getNativeModule();
+    if (Platform.OS !== 'android') {
+      Alert.alert('Android 전용 기능', 'DeepSeek API Key 저장은 Android APK에서 사용할 수 있습니다.');
+      return;
+    }
+    if (!nativeModule || typeof nativeModule.saveDeepSeekApiKey !== 'function') {
+      Alert.alert('네이티브 연결 필요', 'DeepSeek API Key 저장 기능이 아직 연결되지 않았습니다.');
+      return;
+    }
+    const trimmedKey = deepSeekApiKey.trim();
+    if (!trimmedKey) {
+      Alert.alert('입력 필요', 'DeepSeek API Key를 입력해주세요.');
+      return;
+    }
+    try {
+      await nativeModule.saveDeepSeekApiKey(trimmedKey);
+      setDeepSeekApiKey('');
+      await loadDeepSeekSettings();
+      Alert.alert('저장 완료', 'DeepSeek API Key를 저장했습니다.');
+    } catch (error) {
+      Alert.alert('저장 실패', 'DeepSeek API Key를 저장하지 못했습니다.');
+    }
+  };
+
+  const checkDeepSeekBalance = async () => {
+    const nativeModule = getNativeModule();
+    if (Platform.OS !== 'android') {
+      Alert.alert('Android 전용 기능', 'DeepSeek 잔액 조회는 Android APK에서 사용할 수 있습니다.');
+      return;
+    }
+    if (!nativeModule || typeof nativeModule.fetchDeepSeekBalance !== 'function') {
+      Alert.alert('네이티브 연결 필요', 'DeepSeek 잔액 조회 기능이 아직 연결되지 않았습니다.');
+      return;
+    }
+    setDeepSeekBalanceStatus('$...');
+    try {
+      const result = await nativeModule.fetchDeepSeekBalance();
+      if (result?.ok && typeof result.balance === 'number') {
+        setDeepSeekBalanceStatus('$' + result.balance.toFixed(2));
+      } else {
+        setDeepSeekBalanceStatus('$ERR');
+      }
+    } catch (error) {
+      setDeepSeekBalanceStatus('$ERR');
+    }
+  };
 
   const setWidgetOpacityValue = async (value) => {
     const nativeModule = getNativeModule();
@@ -92,7 +166,7 @@ export default function App() {
     }
   };
 
-  useEffect(() => { loadDebugLogs(); loadOpacitySettings(); }, [loadDebugLogs, loadOpacitySettings]);
+  useEffect(() => { loadDebugLogs(); loadOpacitySettings(); loadDeepSeekSettings(); }, [loadDebugLogs, loadOpacitySettings, loadDeepSeekSettings]);
   const showNextStepAlert = (label) => {
     Alert.alert(
       '다음 단계에서 연결',
@@ -262,6 +336,48 @@ export default function App() {
           </TouchableOpacity>
 
           
+        </View>
+
+        <View style={styles.deepSeekCard}>
+          <Text style={styles.sectionTitle}>DeepSeek API 잔액</Text>
+          <Text style={styles.deepSeekDescription}>
+            DeepSeek API Key를 저장하면 현재 잔액을 확인할 수 있습니다. Key는 로그에 표시하지 않습니다.
+          </Text>
+
+          <TextInput
+            style={styles.deepSeekInput}
+            value={deepSeekApiKey}
+            onChangeText={setDeepSeekApiKey}
+            placeholder="DeepSeek API Key 입력"
+            placeholderTextColor="#9A9288"
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry
+          />
+
+          <View style={styles.deepSeekButtonRow}>
+            <TouchableOpacity
+              style={styles.deepSeekButton}
+              activeOpacity={0.8}
+              onPress={saveDeepSeekApiKey}
+            >
+              <Text style={styles.deepSeekButtonText}>API Key 저장</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.deepSeekButton}
+              activeOpacity={0.8}
+              onPress={checkDeepSeekBalance}
+            >
+              <Text style={styles.deepSeekButtonText}>잔액 확인</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.deepSeekStatusBox}>
+            <Text style={styles.deepSeekStatusText}>{deepSeekBalanceStatus}</Text>
+          </View>
+
+          <Text style={styles.deepSeekKeyStatus}>Key 상태: {deepSeekKeyStatus}</Text>
         </View>
 
         <View style={styles.opacityCard}>
@@ -565,6 +681,71 @@ const styles = StyleSheet.create({
     color: '#222222',
     fontSize: 16,
     fontWeight: '700',
+  },
+  deepSeekCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 18,
+    marginBottom: 18,
+    shadowColor: '#000000',
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 3,
+  },
+  deepSeekDescription: {
+    marginTop: -8,
+    marginBottom: 14,
+    fontSize: 13,
+    lineHeight: 19,
+    color: '#817A70',
+  },
+  deepSeekInput: {
+    height: 48,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#DED6CB',
+    backgroundColor: '#F9F7F3',
+    paddingHorizontal: 14,
+    fontSize: 14,
+    color: '#222222',
+    marginBottom: 12,
+  },
+  deepSeekButtonRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 12,
+  },
+  deepSeekButton: {
+    flex: 1,
+    height: 46,
+    borderRadius: 14,
+    backgroundColor: '#171717',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  deepSeekButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  deepSeekStatusBox: {
+    height: 46,
+    borderRadius: 14,
+    backgroundColor: '#171717',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 10,
+  },
+  deepSeekStatusText: {
+    color: '#FACC15',
+    fontSize: 20,
+    fontWeight: '800',
+  },
+  deepSeekKeyStatus: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: '#817A70',
   },
   opacityCard: {
     backgroundColor: '#FFFFFF',

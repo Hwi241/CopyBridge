@@ -774,8 +774,8 @@ override fun onServiceConnected() {
     if (texts.size <= 2) return texts
     val normalized = texts.map { it.trim() }.filter { it.isNotBlank() }
     if (normalized.size <= 2) return normalized
-    val rawSelected = normalized.takeLast(2)
-    appendDebugLog("TG→GPT", "TG_FULL_BOTTOM_CLUSTER before=${normalized.size} after=${rawSelected.size} preview=${compactLogPreview(rawSelected.joinToString("\\n"))}")
+    val rawSelected = normalized.takeLast(3)
+    appendDebugLog("TG→GPT", "TG_FULL_BOTTOM_CLUSTER before=${normalized.size} after=${rawSelected.size} max=3 preview=${compactLogPreview(rawSelected.joinToString("\\n"))}")
     val cleaned = cleanTelegramTextForGptInputFinal(rawSelected)
     return cleaned
   }
@@ -2060,8 +2060,18 @@ override fun onServiceConnected() {
         appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE codeFallbackClick=$fallbackClicked")
         fallbackClicked
       }
+    } else if (gptOutputMode == "FULL") {
+      val gestureClicked = tapNodeCenterByGesture(target.node, "FULL_COPY_BUTTON")
+      appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE fullGestureClicked=$gestureClicked")
+      if (gestureClicked) { true } else {
+        val fallbackClicked = clickNodeOrClickableParent(target.node)
+        appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE fullFallbackClick=$fallbackClicked")
+        fallbackClicked
+      }
     } else {
-      clickNodeOrClickableParent(target.node)
+      val defaultClicked = clickNodeOrClickableParent(target.node)
+      appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE defaultClick=$defaultClicked")
+      defaultClicked
     }
     appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE clicked=$clicked")
     if (!clicked) return false
@@ -2072,6 +2082,41 @@ override fun onServiceConnected() {
     val tgEdit = findEditableNodeFromRoots(tgRoots)
     appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE telegramEdit=${tgEdit != null}")
     if (tgEdit == null) return false
+
+    if (gptOutputMode == "FULL") {
+      val copiedTextBeforePaste = readClipboardText()
+      val dedupedTextBeforePaste = dedupeTelegramSendTextFinal(copiedTextBeforePaste)
+
+      if (copiedTextBeforePaste.isBlank()) {
+        appendDebugLog(
+          "GPT→TG",
+          "COPY_BUTTON_FULL_BLOCKED reason=blankClipboard"
+        )
+        Toast.makeText(this, "GPT 전체 복사에 실패했습니다. 전송하지 않았습니다.", Toast.LENGTH_SHORT).show()
+        return true
+      }
+
+      if (dedupedTextBeforePaste.length < MIN_FULL_COPY_BUTTON_TEXT_LENGTH) {
+        appendDebugLog(
+          "GPT→TG",
+          "COPY_BUTTON_FULL_BLOCKED reason=tooShort length=${dedupedTextBeforePaste.length} min=$MIN_FULL_COPY_BUTTON_TEXT_LENGTH preview=${compactLogPreview(dedupedTextBeforePaste)}"
+        )
+        Toast.makeText(this, "GPT 전체 복사 결과가 너무 짧아 전송하지 않았습니다.", Toast.LENGTH_SHORT).show()
+        return true
+      }
+
+      if (
+        dedupedTextBeforePaste.isNotBlank() &&
+        dedupedTextBeforePaste != copiedTextBeforePaste
+      ) {
+        appendDebugLog(
+          "GPT→TG",
+          "COPY_BUTTON_FULL_DEDUP before=${copiedTextBeforePaste.length} after=${dedupedTextBeforePaste.length}"
+        )
+        copyToClipboard(dedupedTextBeforePaste)
+      }
+    }
+
     tgEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
     tgEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
     var pasted = try { pasteClipboardToNode(tgEdit) } catch (error: Exception) { appendDebugLog("GPT→TG", "EXCEPTION copyButtonPaste ${error::class.java.simpleName}: ${error.message}"); false }
@@ -2474,6 +2519,8 @@ override fun onServiceConnected() {
     private const val MAX_SINGLE_LINE_LENGTH = 600
     private const val MAX_DEBUG_LINES = 60
     private const val MAX_DEBUG_CHARS = 6000
+    private const val MIN_FULL_COPY_BUTTON_TEXT_LENGTH = 500
+    private const val MIN_CODE_SEND_TEXT_LENGTH = 20
     private const val AUTO_SEND_FIRST_RETRY_DELAY_MS = 250L
     private const val AUTO_SEND_SECOND_RETRY_DELAY_MS = 150L
     const val COPY_MODE_FULL = "FULL"
@@ -2827,14 +2874,23 @@ override fun onServiceConnected() {
 
         textToSend = service.clampCopyText(selectedCode)
         service.appendDebugLog("GPT\u2192TG", "CODE_FALLBACK textToSendLength=${textToSend.length}")
-        if (textToSend.isBlank()) {
+                if (textToSend.isBlank()) {
           val finalTexts = service.collectLatestAiAnswerFallbackTexts(aiRoots)
           val finalCodeBlocks = service.extractCodeBlocks(finalTexts)
-          val finalFull = if (finalCodeBlocks.isNotEmpty()) { finalCodeBlocks.last().trim() } else { finalTexts.joinToString("\n") }
+
+          val finalFull = if (finalCodeBlocks.isNotEmpty()) {
+            finalCodeBlocks.last().trim()
+          } else {
+            finalTexts.joinToString("\n")
+          }
+
           textToSend = service.clampCopyText(finalFull)
-          service.appendDebugLog("GPT\u2192TG", "CODE_FINAL_FALLBACK source=${if (finalCodeBlocks.isNotEmpty()) "codeBlocks" else "fullFallback"} textLength=${textToSend.length}")
+          service.appendDebugLog(
+            "GPT→TG",
+            "CODE_FINAL_FALLBACK source=${if (finalCodeBlocks.isNotEmpty()) "codeBlocks" else "visibleTexts"} textLength=${textToSend.length}"
+          )
         }
-          // CODE_EMPTY_FALLBACK removed in 214: restore stable transfer flow
+          // CODE_EMPTY_FALLBACK restored with short-text guard
 
       } else {
         gptCopySource = "fallback_full_visible"
@@ -2848,6 +2904,16 @@ override fun onServiceConnected() {
         textToSend = service.clampCopyText(fullText)
       }
       // CODE dedupe call removed in 214: restore stable CODE transfer
+
+
+        if (gptOutputMode == "CODE" && textToSend.trim().length < MIN_CODE_SEND_TEXT_LENGTH) {
+          service.appendDebugLog(
+            "GPT→TG",
+            "CODE_SEND_BLOCKED reason=tooShort length=${textToSend.trim().length} min=$MIN_CODE_SEND_TEXT_LENGTH preview=${service.compactLogPreview(textToSend)}"
+          )
+          Toast.makeText(context, "코드 내용이 너무 짧아 전송하지 않았습니다.", Toast.LENGTH_SHORT).show()
+          return false
+        }
 
 
       
