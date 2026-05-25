@@ -2330,6 +2330,80 @@ override fun onServiceConnected() {
     return builder.toString()
   }
 
+  private fun logAiRootsForTgToGptDebug(
+    label: String,
+    roots: List<AccessibilityNodeInfo>
+  ) {
+    roots.take(6).forEachIndexed { index, root ->
+      val rect = Rect()
+      root.getBoundsInScreen(rect)
+      appendDebugLog(
+        "TG→GPT",
+        "$label[$index] package=${root.packageName} class=${root.className} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} visible=${root.isVisibleToUser} childCount=${root.childCount}"
+      )
+    }
+  }
+
+  private fun getAiRootsWithRetryForTgToGpt(
+    label: String,
+    maxAttempts: Int = TG_TO_GPT_FIND_RETRY_COUNT,
+    delayMs: Long = TG_TO_GPT_FIND_RETRY_DELAY_MS
+  ): List<AccessibilityNodeInfo> {
+    var latestRoots = emptyList<AccessibilityNodeInfo>()
+
+    for (attempt in 1..maxAttempts) {
+      latestRoots = getAiRoots()
+
+      appendDebugLog(
+        "TG→GPT",
+        "$label attempt=$attempt roots=${latestRoots.size}"
+      )
+
+      if (latestRoots.isNotEmpty()) {
+        logAiRootsForTgToGptDebug("${label}_ROOT", latestRoots)
+        return latestRoots
+      }
+
+      if (attempt < maxAttempts) {
+        android.os.SystemClock.sleep(delayMs)
+      }
+    }
+
+    return latestRoots
+  }
+
+  private fun findAiEditableWithRetryForTgToGpt(
+    initialRoots: List<AccessibilityNodeInfo>,
+    maxAttempts: Int = TG_TO_GPT_FIND_RETRY_COUNT,
+    delayMs: Long = TG_TO_GPT_FIND_RETRY_DELAY_MS
+  ): Pair<AccessibilityNodeInfo?, List<AccessibilityNodeInfo>> {
+    var latestRoots = initialRoots
+
+    for (attempt in 1..maxAttempts) {
+      if (latestRoots.isEmpty()) {
+        latestRoots = getAiRoots()
+      }
+
+      val editNode = findEditableNodeFromRoots(latestRoots)
+
+      appendDebugLog(
+        "TG→GPT",
+        "TG_TO_GPT_FIND_EDIT attempt=$attempt roots=${latestRoots.size} found=${editNode != null}"
+      )
+
+      if (editNode != null) {
+        return editNode to latestRoots
+      }
+
+      if (attempt < maxAttempts) {
+        android.os.SystemClock.sleep(delayMs)
+        latestRoots = getAiRoots()
+      }
+    }
+
+    return null to latestRoots
+  }
+
   private fun buildAiWindowDebugInfo(reason: String, roots: List<AccessibilityNodeInfo>): String {
     val builder = StringBuilder()
     builder.appendLine("[CopyBridge AI Window 진단]")
@@ -2521,6 +2595,8 @@ override fun onServiceConnected() {
     private const val MAX_DEBUG_CHARS = 6000
     private const val MIN_FULL_COPY_BUTTON_TEXT_LENGTH = 500
     private const val MIN_CODE_SEND_TEXT_LENGTH = 20
+    private const val TG_TO_GPT_FIND_RETRY_COUNT = 5
+    private const val TG_TO_GPT_FIND_RETRY_DELAY_MS = 250L
     private const val AUTO_SEND_FIRST_RETRY_DELAY_MS = 250L
     private const val AUTO_SEND_SECOND_RETRY_DELAY_MS = 150L
     const val COPY_MODE_FULL = "FULL"
@@ -2562,11 +2638,21 @@ override fun onServiceConnected() {
         return false
       }
 
+      service.appendDebugLog(
+        "TG→GPT",
+        "TG_TO_GPT_START copyMode=$copyMode autoSend=$autoSend"
+      )
+
       val tgRoots = service.getTelegramRoots()
       if (tgRoots.isEmpty()) {
         Toast.makeText(context, "Telegram 채팅방을 화면에 열어주세요.", Toast.LENGTH_SHORT).show()
         return false
       }
+
+      service.appendDebugLog(
+        "TG→GPT",
+        "TG_TO_GPT_TG_ROOTS count=${tgRoots.size}"
+      )
       val telegramTypingByTopBar = service.logTelegramTopBarSnapshotForDebug(tgRoots)
       var telegramTypingDecision = telegramTypingByTopBar
 
@@ -2610,6 +2696,12 @@ override fun onServiceConnected() {
       service.scanTelegramTypingIndicatorForDebug(tgRoots)
 
       val candidates = service.collectTelegramMessageCandidates(tgRoots)
+
+      service.appendDebugLog(
+        "TG→GPT",
+        "TG_TO_GPT_CANDIDATES count=${candidates.size}"
+      )
+
       if (candidates.isEmpty()) {
         val debug = service.buildTelegramCopyDebugInfo(tgRoots)
         service.copyToClipboard(debug)
@@ -2630,30 +2722,74 @@ override fun onServiceConnected() {
       val textToSend = selectedTexts.joinToString("\n")
       service.appendDebugLog("TG\u2192GPT", "mode=$copyMode selected=${selectedTexts.size} textLength=${textToSend.length} preview=${service.compactLogPreview(textToSend)}")
 
-      val aiRoots = service.getAiRoots()
-      service.appendDebugLog("GPT\u2192TG", "STEP 2 aiRoots=${aiRoots.size}")
+      service.appendDebugLog(
+        "TG→GPT",
+        "TG_TO_GPT_SELECTED count=${selectedTexts.size} textLength=${textToSend.length} preview=${service.compactLogPreview(textToSend)}"
+      )
+
+      val aiRoots = service.getAiRootsWithRetryForTgToGpt("TG_TO_GPT_AI_ROOTS")
       if (aiRoots.isEmpty()) {
         service.copyToClipboard(textToSend)
-        Toast.makeText(context, "GPT/AI 앱을 찾지 못했습니다. 텍스트는 클립보드에 복사되었습니다.", Toast.LENGTH_SHORT).show()
+        service.appendDebugLog(
+          "TG→GPT",
+          "TG_TO_GPT_BLOCKED reason=noAiRootsAfterRetry textLength=${textToSend.length}"
+        )
+        Toast.makeText(
+          context,
+          "GPT 화면을 찾지 못했습니다. 텍스트는 복사되었습니다. GPT 화면을 한 번 터치한 뒤 다시 시도해주세요.",
+          Toast.LENGTH_LONG
+        ).show()
         return true
       }
 
-      val freshInputRoots = service.getAiRoots()
-      val aiEdit = service.findEditableNodeFromRoots(
-        if (freshInputRoots.isNotEmpty()) freshInputRoots else aiRoots
+      val freshInputRoots = service.getAiRootsWithRetryForTgToGpt("TG_TO_GPT_FRESH_AI_ROOTS")
+      val rootsForEdit = if (freshInputRoots.isNotEmpty()) freshInputRoots else aiRoots
+
+      val editResult = service.findAiEditableWithRetryForTgToGpt(rootsForEdit)
+      val aiEdit = editResult.first
+
+      service.appendDebugLog(
+        "TG→GPT",
+        "TG_TO_GPT_AI_EDIT_FOUND value=${aiEdit != null} roots=${editResult.second.size}"
       )
+
       if (aiEdit == null) {
         service.copyToClipboard(textToSend)
-        Toast.makeText(context, "GPT 입력창을 찾지 못했습니다. 텍스트는 클립보드에 복사되었습니다.", Toast.LENGTH_SHORT).show()
+        service.appendDebugLog(
+          "TG→GPT",
+          "TG_TO_GPT_BLOCKED reason=noAiEditAfterRetry textLength=${textToSend.length}"
+        )
+        Toast.makeText(
+          context,
+          "GPT 입력창을 찾지 못했습니다. 텍스트는 복사되었습니다. GPT 입력창을 한 번 터치한 뒤 다시 시도해주세요.",
+          Toast.LENGTH_LONG
+        ).show()
         return true
       }
 
       val setTextOk = service.setTextToNode(aiEdit, textToSend)
+
+      service.appendDebugLog(
+        "TG→GPT",
+        "TG_TO_GPT_SET_TEXT result=$setTextOk textLength=${textToSend.length}"
+      )
+
       val inputOk = if (setTextOk) {
         true
       } else {
         service.copyToClipboard(textToSend)
-        service.pasteClipboardToNode(aiEdit)
+        aiEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        aiEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        android.os.SystemClock.sleep(200L)
+
+        val pasteOk = service.pasteClipboardToNode(aiEdit)
+
+        service.appendDebugLog(
+          "TG→GPT",
+          "TG_TO_GPT_PASTE_FALLBACK result=$pasteOk textLength=${textToSend.length}"
+        )
+
+        pasteOk
       }
 
       val modeLabel = if (copyMode == COPY_MODE_LAST) "마지막" else "전체"
@@ -2671,7 +2807,15 @@ override fun onServiceConnected() {
       if (!inputOk) {
         val debug = service.buildAiWindowDebugInfo("GPT 텍스트 입력 실패", aiRoots)
         service.copyToClipboard(debug)
-        Toast.makeText(context, "GPT 입력에 실패했습니다. 진단 정보가 복사되었습니다.", Toast.LENGTH_SHORT).show()
+        service.appendDebugLog(
+          "TG→GPT",
+          "TG_TO_GPT_BLOCKED reason=inputFailedAfterSetTextAndPaste"
+        )
+        Toast.makeText(
+          context,
+          "GPT 입력에 실패했습니다. 진단 정보가 복사되었습니다. GPT 입력창을 한 번 터치한 뒤 다시 시도해주세요.",
+          Toast.LENGTH_LONG
+        ).show()
         return true
       }
 
