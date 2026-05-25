@@ -70,6 +70,7 @@ class FloatingWidgetService : Service() {
     val titleTextSize: Float,
     val headerButtonSize: Int
   ) {
+    COMPACT("SS", 8, 10, 10, 124, 128, 32, 11f, 10f, 36),
     SMALL("S", 22, 18, 20, 260, 74, 46, 12f, 12f, 48),
     MEDIUM("M", 24, 20, 22, 300, 84, 50, 13f, 13f, 52),
     LARGE("L", 26, 22, 24, 340, 94, 54, 14f, 14f, 56),
@@ -229,10 +230,11 @@ class FloatingWidgetService : Service() {
     val currentY = layoutParams?.y ?: 320
 
     widgetSize = when (widgetSize) {
+      WidgetSize.COMPACT -> WidgetSize.SMALL
       WidgetSize.SMALL -> WidgetSize.MEDIUM
       WidgetSize.MEDIUM -> WidgetSize.LARGE
       WidgetSize.LARGE -> WidgetSize.EXTRA_LARGE
-      WidgetSize.EXTRA_LARGE -> WidgetSize.SMALL
+      WidgetSize.EXTRA_LARGE -> WidgetSize.COMPACT
     }
 
     removeFloatingWidget()
@@ -254,6 +256,7 @@ class FloatingWidgetService : Service() {
     val size = widgetSize
 
     if (isCollapsed) return createCollapsedView()
+    if (size == WidgetSize.COMPACT) return createCompactWidgetView(isBridgeBusy, bridgeStatusText)
 
     val widgetBackgroundColor = if (isBridgeBusy) { Color.WHITE } else { Color.parseColor("#171717") }
     val widgetPrimaryTextColor = if (isBridgeBusy) { Color.parseColor("#171717") } else { Color.WHITE }
@@ -358,6 +361,102 @@ class FloatingWidgetService : Service() {
     panel.addView(gptOutputButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply { bottomMargin = 10 })
     panel.addView(autoSendButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight))
     panel.addView(createBridgeStatusTextView(bridgeStatusText))
+
+    panel.alpha = widgetOpacity
+    panel.setOnTouchListener { _, event -> handleDrag(event); true }
+    return panel
+  }
+
+  private fun createCompactWidgetView(
+    isBridgeBusy: Boolean,
+    bridgeStatusText: String
+  ): View {
+    val size = WidgetSize.COMPACT
+    val compactBackgroundColor = if (isBridgeBusy) {
+      Color.WHITE
+    } else {
+      Color.parseColor("#171717")
+    }
+
+    val panel = LinearLayout(this).apply {
+      orientation = LinearLayout.VERTICAL
+      setPadding(size.panelPaddingHorizontal, size.panelPaddingTop, size.panelPaddingHorizontal, size.panelPaddingBottom)
+      background = roundedBackground(compactBackgroundColor, 12f)
+      elevation = 12f
+    }
+
+    val header = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER
+    }
+
+    val collapseButton = createHeaderButton("−") {
+      isCollapsed = true
+      saveWidgetPreferences()
+      refreshWidgetAtSamePosition()
+    }
+
+    val sizeButton = createHeaderButton(size.label) {
+      cycleWidgetSize()
+    }
+
+    val closeButton = createHeaderButton("×") {
+      Toast.makeText(this, "CopyBridge 위젯을 종료합니다.", Toast.LENGTH_SHORT).show()
+      stopSelf()
+    }.apply {
+      textSize = 16f
+    }
+
+    header.addView(
+      collapseButton,
+      LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize).apply { rightMargin = 6 }
+    )
+    header.addView(
+      sizeButton,
+      LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize).apply { rightMargin = 6 }
+    )
+    header.addView(
+      closeButton,
+      LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize)
+    )
+
+    val apiBalanceBox = createApiBalanceBox(size.buttonTextSize)
+    apiBalanceBoxView = apiBalanceBox
+    apiBalanceTextView = apiBalanceBox
+    updateApiBalanceBoxText()
+
+    val gptButton = createWhiteButton("G", 22f) {
+      appendDebugLog("WIDGET", "tap SS G replyMode=$replyCopyModeString autoSend=$autoSendEnabled")
+      CopyBridgeAccessibilityService.requestTelegramToGpt(this, replyCopyModeString, autoSendEnabled)
+    }
+
+    val tgButton = createTelegramBlueButton("T", 22f) {
+      gptOutputModeString = "CODE"
+      saveWidgetPreferences()
+      appendDebugLog("WIDGET", "tap SS T gptMode=CODE autoSend=$autoSendEnabled")
+      CopyBridgeAccessibilityService.requestGptToTelegram(this, "CODE", autoSendEnabled)
+    }
+
+    panel.addView(
+      header,
+      LinearLayout.LayoutParams(size.contentWidth, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 6 }
+    )
+    panel.addView(
+      apiBalanceBox,
+      LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply { bottomMargin = 6 }
+    )
+    panel.addView(
+      gptButton,
+      LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply { bottomMargin = 6 }
+    )
+    panel.addView(
+      tgButton,
+      LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply { bottomMargin = 6 }
+    )
+    panel.addView(
+      createBridgeStatusTextView(bridgeStatusText),
+      LinearLayout.LayoutParams(size.contentWidth, LinearLayout.LayoutParams.WRAP_CONTENT)
+    )
 
     panel.alpha = widgetOpacity
     panel.setOnTouchListener { _, event -> handleDrag(event); true }
