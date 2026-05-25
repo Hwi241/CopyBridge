@@ -316,6 +316,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
     if (roots.isEmpty()) {
       appendDebugLog("WIDGET", "BRIDGE_MONITOR_TICK roots=0 skipped=true")
+
       return
     }
 
@@ -1083,7 +1084,7 @@ override fun onServiceConnected() {
       collectExactTelegramTypingTopNodesForDecision(
         node = root,
         out = nodes,
-        maxY = (screenHeight * 0.18f).toInt()
+        maxY = rootRect.top + (screenHeight * 0.28f).toInt()
       )
     }
 
@@ -1160,7 +1161,7 @@ override fun onServiceConnected() {
       collectTopAreaNodesForDebug(
         node = root,
         out = nodes,
-        maxY = (screenHeight * 0.18f).toInt()
+        maxY = rootRect.top + (screenHeight * 0.28f).toInt()
       )
     }
 
@@ -2778,6 +2779,26 @@ override fun onServiceConnected() {
         true
       } else {
         service.copyToClipboard(textToSend)
+
+        val clearOk = service.setTextToNode(aiEdit, "")
+        service.appendDebugLog(
+          "TG→GPT",
+          "TG_TO_GPT_CLEAR_BEFORE_PASTE result=$clearOk"
+        )
+
+        if (!clearOk) {
+          service.appendDebugLog(
+            "TG→GPT",
+            "TG_TO_GPT_PASTE_BLOCKED reason=clearFailed textLength=${textToSend.length}"
+          )
+          Toast.makeText(
+            context,
+            "GPT 입력창 초기화에 실패했습니다. 텍스트는 복사되었습니다. 입력창을 비운 뒤 다시 눌러주세요.",
+            Toast.LENGTH_LONG
+          ).show()
+          return true
+        }
+
         aiEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         aiEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         android.os.SystemClock.sleep(200L)
