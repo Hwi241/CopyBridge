@@ -326,6 +326,17 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
     appendDebugLog("WIDGET", "BRIDGE_MONITOR_ROOTS all=${allRoots.size} tg=${tgRootsForMonitor.size} gpt=${gptRootsForMonitor.size}")
 
+    if (tgRootsForMonitor.isEmpty() || gptRootsForMonitor.isEmpty()) {
+      allRoots.take(12).forEachIndexed { index, root ->
+        val rect = android.graphics.Rect()
+        root.getBoundsInScreen(rect)
+        appendDebugLog(
+          "WIDGET",
+          "BRIDGE_MONITOR_ROOT_PACKAGE[$index] package=${root.packageName} class=${root.className} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} visible=${root.isVisibleToUser} childCount=${root.childCount}"
+        )
+      }
+    }
+
     val telegramTyping = if (tgRootsForMonitor.isNotEmpty()) {
       val tgExact = hasExactTelegramTypingTopBarNodeForDecision(tgRootsForMonitor)
       val tgTopbar = logTelegramTopBarSnapshotForDebug(tgRootsForMonitor)

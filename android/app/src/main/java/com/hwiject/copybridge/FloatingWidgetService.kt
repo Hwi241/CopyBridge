@@ -400,24 +400,13 @@ class FloatingWidgetService : Service() {
       cycleWidgetSize()
     }
 
-    val closeButton = createHeaderButton("×") {
-      Toast.makeText(this, "CopyBridge 위젯을 종료합니다.", Toast.LENGTH_SHORT).show()
-      stopSelf()
-    }.apply {
-      textSize = 16f
-    }
-
     header.addView(
       collapseButton,
-      LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize).apply { rightMargin = 6 }
+      LinearLayout.LayoutParams(0, size.headerButtonSize, 1f).apply { rightMargin = 6 }
     )
     header.addView(
       sizeButton,
-      LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize).apply { rightMargin = 6 }
-    )
-    header.addView(
-      closeButton,
-      LinearLayout.LayoutParams(size.headerButtonSize, size.headerButtonSize)
+      LinearLayout.LayoutParams(0, size.headerButtonSize, 1f)
     )
 
     val apiBalanceBox = createApiBalanceBox(size.buttonTextSize)
