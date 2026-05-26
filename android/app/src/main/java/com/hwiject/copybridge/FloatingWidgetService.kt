@@ -225,6 +225,73 @@ class FloatingWidgetService : Service() {
     }
   }
 
+  private fun runTelegramToGptWithTemporaryWidgetHide(
+    source: String
+  ) {
+    val currentParams = layoutParams
+    val currentX = currentParams?.x ?: getSavedWidgetX()
+    val currentY = currentParams?.y ?: getSavedWidgetY()
+
+    appendDebugLog(
+      "WIDGET",
+      "TG_TO_GPT_HIDE_WIDGET_START source=$source x=$currentX y=$currentY"
+    )
+
+    try {
+      saveWidgetPosition(currentX, currentY)
+    } catch (_: Exception) {}
+
+    try {
+      floatingView?.let { view ->
+        windowManager?.removeView(view)
+      }
+      floatingView = null
+    } catch (e: Exception) {
+      appendDebugLog(
+        "WIDGET",
+        "TG_TO_GPT_HIDE_WIDGET_REMOVE_ERROR ${e.javaClass.simpleName}: ${e.message.orEmpty().take(120)}"
+      )
+      floatingView = null
+    }
+
+    Handler(Looper.getMainLooper()).postDelayed({
+      try {
+        appendDebugLog(
+          "WIDGET",
+          "TG_TO_GPT_HIDE_WIDGET_RUN source=$source replyMode=$replyCopyModeString autoSend=$autoSendEnabled"
+        )
+
+        CopyBridgeAccessibilityService.requestTelegramToGpt(
+          this,
+          replyCopyModeString,
+          autoSendEnabled
+        )
+      } finally {
+        Handler(Looper.getMainLooper()).postDelayed({
+          try {
+            if (floatingView == null) {
+              showFloatingWidget()
+              layoutParams?.x = currentX
+              layoutParams?.y = currentY
+              floatingView?.let { view ->
+                windowManager?.updateViewLayout(view, layoutParams)
+              }
+              appendDebugLog(
+                "WIDGET",
+                "TG_TO_GPT_HIDE_WIDGET_RESTORE source=$source x=$currentX y=$currentY"
+              )
+            }
+          } catch (e: Exception) {
+            appendDebugLog(
+              "WIDGET",
+              "TG_TO_GPT_HIDE_WIDGET_RESTORE_ERROR ${e.javaClass.simpleName}: ${e.message.orEmpty().take(120)}"
+            )
+          }
+        }, 250L)
+      }
+    }, 350L)
+  }
+
   private fun cycleWidgetSize() {
     val currentX = layoutParams?.x ?: 40
     val currentY = layoutParams?.y ?: 320
@@ -338,7 +405,7 @@ class FloatingWidgetService : Service() {
 
     val gptButton = createWhiteButton("GPT로 보내기", size.buttonTextSize) {
             appendDebugLog("WIDGET", "tap GPT로 보내기 replyMode=$replyCopyModeString autoSend=$autoSendEnabled")
-      CopyBridgeAccessibilityService.requestTelegramToGpt(this, replyCopyModeString, autoSendEnabled)
+      runTelegramToGptWithTemporaryWidgetHide("normal")
     }
 
     val apiBalanceBox = createApiBalanceBox(size.buttonTextSize)
@@ -416,7 +483,7 @@ class FloatingWidgetService : Service() {
 
     val gptButton = createWhiteButton("G", 22f) {
       appendDebugLog("WIDGET", "tap SS G replyMode=$replyCopyModeString autoSend=$autoSendEnabled")
-      CopyBridgeAccessibilityService.requestTelegramToGpt(this, replyCopyModeString, autoSendEnabled)
+      runTelegramToGptWithTemporaryWidgetHide("ss")
     }
 
     val tgButton = createTelegramBlueButton("T", 22f) {

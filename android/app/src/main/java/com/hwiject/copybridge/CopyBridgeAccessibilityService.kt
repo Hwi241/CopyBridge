@@ -705,7 +705,7 @@ override fun onServiceConnected() {
 
     val sorted = rawCandidates
       .mapNotNull { candidate ->
-        val cleaned = normalizeCandidateText(candidate.text)
+        val cleaned = normalizeTelegramTextForGptPreserveLines(candidate.text)
         if (cleaned.isBlank()) return@mapNotNull null
         if (shouldIgnoreMessageText(cleaned)) return@mapNotNull null
         candidate.copy(text = cleaned)
@@ -756,6 +756,18 @@ override fun onServiceConnected() {
     val result = dedupedLines.joinToString("\n").trim()
     appendDebugLog("GPT→TG", "CODE_FINAL_DEDUP beforeLength=$beforeLength afterLength=${result.length}")
     return result
+  }
+
+  private fun normalizeTelegramTextForGptPreserveLines(value: String): String {
+    val keptLines = value
+      .replace("\r\n", "\n")
+      .replace("\r", "\n")
+      .lines()
+      .map { it.trimEnd() }
+      .dropWhile { it.isBlank() }
+      .dropLastWhile { it.isBlank() }
+
+    return keptLines.joinToString("\n").trim()
   }
 
   private fun cleanTelegramTextForGptInputFinal(
@@ -1339,7 +1351,7 @@ override fun onServiceConnected() {
   ): List<String> {
     return candidates
       .mapNotNull { candidate ->
-        val cleaned = normalizeCandidateText(candidate.text)
+        val cleaned = normalizeTelegramTextForGptPreserveLines(candidate.text)
         if (cleaned.isBlank()) return@mapNotNull null
         if (shouldIgnoreMessageText(cleaned)) return@mapNotNull null
         candidate.copy(text = cleaned)
@@ -1618,7 +1630,10 @@ override fun onServiceConnected() {
   }
 
   private fun buildCopyText(lines: List<String>): String {
-    val body = lines.joinToString("\n")
+    val body = lines
+      .map { normalizeTelegramTextForGptPreserveLines(it) }
+      .filter { it.isNotBlank() }
+      .joinToString("\n\n")
     val limitedBody = if (body.length > MAX_COPY_CHARS) {
       body.take(MAX_COPY_CHARS) + "\n...(길이 제한으로 일부만 복사됨)"
     } else {
