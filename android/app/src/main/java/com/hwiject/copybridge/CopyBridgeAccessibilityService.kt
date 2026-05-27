@@ -398,6 +398,35 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         gptCompletedByIdleTimeout -> false
         else -> previousGptBusy
       }
+
+      val gptBusyAfterDecision = lastBridgeMonitorGptBusy ?: false
+      if (previousGptBusy && !gptBusyAfterDecision) {
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_BUSY_FALSE_EDGE previousBusy=$previousGptBusy stop=$gptBusyByStop actionComplete=$gptCompletedByActionRow recentStop=$gptTextChangeRecentStopSeen active=$gptBusyByTextChange idleTimeout=$gptCompletedByIdleTimeout ageMs=$gptTextChangeAgeMs"
+        )
+
+        val edgeRoots = collectBridgeMonitorRoots()
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_BUSY_FALSE_EDGE_ROOTS count=${edgeRoots.size}"
+        )
+        edgeRoots.take(8).forEachIndexed { index, root ->
+          val rect = android.graphics.Rect()
+          root.getBoundsInScreen(rect)
+          appendDebugLog(
+            "GPT→TG",
+            "GPT_BUSY_FALSE_EDGE_ROOT[$index] package=${root.packageName} class=${root.className} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} visible=${root.isVisibleToUser} childCount=${root.childCount}"
+          )
+        }
+
+        if (gptTextChangeAgeMs >= 0L && gptCompletedByActionRow) {
+          appendDebugLog(
+            "GPT→TG",
+            "GPT_TEXT_MISSING_ACTION_COMPLETE ageMs=$gptTextChangeAgeMs actionComplete=$gptCompletedByActionRow previousBusy=$previousGptBusy"
+          )
+        }
+      }
     } else {
       appendDebugLog("WIDGET", "GPT_MONITOR_SKIPPED reason=noGptRoot")
       lastBridgeMonitorGptBusy = false

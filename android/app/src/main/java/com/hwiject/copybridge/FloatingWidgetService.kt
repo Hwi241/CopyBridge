@@ -346,7 +346,7 @@ class FloatingWidgetService : Service() {
     if (isCollapsed) return createCollapsedView()
     if (size == WidgetSize.COMPACT) return createCompactWidgetView(gptBusy, telegramTyping, bridgeStatusText)
 
-    val telegramBlueColor = Color.parseColor("#DDF3FF")
+    val telegramBlueColor = Color.parseColor("#BFEAFF")
 
     val widgetBackgroundColor = when {
       gptBusy -> Color.WHITE
@@ -484,7 +484,7 @@ class FloatingWidgetService : Service() {
   ): View {
     val isBridgeBusy = gptBusy || telegramTyping
     val size = WidgetSize.COMPACT
-    val telegramBlueColor = Color.parseColor("#DDF3FF")
+    val telegramBlueColor = Color.parseColor("#BFEAFF")
 
     val compactBackgroundColor = when {
       gptBusy -> Color.WHITE
@@ -1034,6 +1034,7 @@ class FloatingWidgetService : Service() {
     private const val API_BALANCE_RECENT_WINDOW_MS = 5 * 60_000L
     private const val API_BALANCE_HISTORY_WINDOW_MS = 10 * 60_000L
     private const val API_BALANCE_WARNING_MULTIPLIER = 1.5
+    private const val API_BALANCE_ONE_MINUTE_DROP_WARNING_USD = 0.10
     private const val API_BALANCE_BLINK_INTERVAL_MS = 500L
     private const val API_BALANCE_BLINK_COUNT = 6
   }
