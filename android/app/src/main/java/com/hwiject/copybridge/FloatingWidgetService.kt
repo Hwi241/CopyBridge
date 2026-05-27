@@ -225,6 +225,27 @@ class FloatingWidgetService : Service() {
     }
   }
 
+  private fun runTelegramToGptSmart(
+    source: String
+  ) {
+    val rootReady = CopyBridgeAccessibilityService.hasTelegramAndGptRootsForBridgeNow()
+
+    appendDebugLog(
+      "WIDGET",
+      "TG_TO_GPT_SMART_ROUTE source=$source rootReady=$rootReady replyMode=$replyCopyModeString autoSend=$autoSendEnabled"
+    )
+
+    if (rootReady) {
+      CopyBridgeAccessibilityService.requestTelegramToGpt(
+        this,
+        replyCopyModeString,
+        autoSendEnabled
+      )
+    } else {
+      runTelegramToGptWithTemporaryWidgetHide(source)
+    }
+  }
+
   private fun runTelegramToGptWithTemporaryWidgetHide(
     source: String
   ) {
@@ -323,13 +344,35 @@ class FloatingWidgetService : Service() {
     val size = widgetSize
 
     if (isCollapsed) return createCollapsedView()
-    if (size == WidgetSize.COMPACT) return createCompactWidgetView(isBridgeBusy, bridgeStatusText)
+    if (size == WidgetSize.COMPACT) return createCompactWidgetView(gptBusy, telegramTyping, bridgeStatusText)
 
-    val widgetBackgroundColor = if (isBridgeBusy) { Color.WHITE } else { Color.parseColor("#171717") }
-    val widgetPrimaryTextColor = if (isBridgeBusy) { Color.parseColor("#171717") } else { Color.WHITE }
-    val widgetSecondaryTextColor = if (isBridgeBusy) { Color.parseColor("#585858") } else { Color.argb(220, 255, 255, 255) }
+    val telegramBlueColor = Color.parseColor("#229ED9")
 
-    appendDebugLog("WIDGET", "WIDGET_STYLE_STATE busy=$isBridgeBusy background=${if (isBridgeBusy) "light" else "dark"}")
+    val widgetBackgroundColor = when {
+      gptBusy -> Color.WHITE
+      telegramTyping -> telegramBlueColor
+      else -> Color.parseColor("#171717")
+    }
+
+    val widgetPrimaryTextColor = when {
+      gptBusy -> Color.parseColor("#171717")
+      telegramTyping -> Color.WHITE
+      else -> Color.WHITE
+    }
+
+    val widgetSecondaryTextColor = when {
+      gptBusy -> Color.parseColor("#585858")
+      telegramTyping -> Color.argb(230, 255, 255, 255)
+      else -> Color.argb(220, 255, 255, 255)
+    }
+
+    val widgetBackgroundName = when {
+      gptBusy -> "gpt_light"
+      telegramTyping -> "telegram_blue"
+      else -> "dark"
+    }
+
+    appendDebugLog("WIDGET", "WIDGET_STYLE_STATE gptBusy=$gptBusy telegramTyping=$telegramTyping background=$widgetBackgroundName")
 
     val panel = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
@@ -405,7 +448,7 @@ class FloatingWidgetService : Service() {
 
     val gptButton = createWhiteButton("GPT로 보내기", size.buttonTextSize) {
             appendDebugLog("WIDGET", "tap GPT로 보내기 replyMode=$replyCopyModeString autoSend=$autoSendEnabled")
-      runTelegramToGptWithTemporaryWidgetHide("normal")
+      runTelegramToGptSmart("normal")
     }
 
     val apiBalanceBox = createApiBalanceBox(size.buttonTextSize)
@@ -435,15 +478,27 @@ class FloatingWidgetService : Service() {
   }
 
   private fun createCompactWidgetView(
-    isBridgeBusy: Boolean,
+    gptBusy: Boolean,
+    telegramTyping: Boolean,
     bridgeStatusText: String
   ): View {
+    val isBridgeBusy = gptBusy || telegramTyping
     val size = WidgetSize.COMPACT
-    val compactBackgroundColor = if (isBridgeBusy) {
-      Color.WHITE
-    } else {
-      Color.parseColor("#171717")
+    val telegramBlueColor = Color.parseColor("#229ED9")
+
+    val compactBackgroundColor = when {
+      gptBusy -> Color.WHITE
+      telegramTyping -> telegramBlueColor
+      else -> Color.parseColor("#171717")
     }
+
+    val compactBackgroundName = when {
+      gptBusy -> "gpt_light"
+      telegramTyping -> "telegram_blue"
+      else -> "dark"
+    }
+
+    appendDebugLog("WIDGET", "WIDGET_COMPACT_STYLE_STATE gptBusy=$gptBusy telegramTyping=$telegramTyping background=$compactBackgroundName")
 
     val panel = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
@@ -483,7 +538,7 @@ class FloatingWidgetService : Service() {
 
     val gptButton = createWhiteButton("G", 22f) {
       appendDebugLog("WIDGET", "tap SS G replyMode=$replyCopyModeString autoSend=$autoSendEnabled")
-      runTelegramToGptWithTemporaryWidgetHide("ss")
+      runTelegramToGptSmart("ss")
     }
 
     val tgButton = createTelegramBlueButton("T", 22f) {
@@ -805,6 +860,8 @@ class FloatingWidgetService : Service() {
       textSize = 13f
       typeface = Typeface.DEFAULT_BOLD
       gravity = Gravity.CENTER
+      includeFontPadding = false
+      setPadding(0, 0, 0, 2)
       background = roundedBackground(Color.parseColor("#333333"), 12f)
       setOnClickListener { onClick() }
       setOnTouchListener { view, event ->

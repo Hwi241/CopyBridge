@@ -664,6 +664,25 @@ override fun onServiceConnected() {
     return candidates
   }
 
+    private fun hasTelegramAndGptRootsForBridgeNowInternal(): Boolean {
+    val allRoots = collectBridgeMonitorRoots()
+    val telegramRoots = allRoots.filter { root ->
+      val packageName = root.packageName?.toString().orEmpty()
+      packageName.lowercase().contains("telegram")
+    }
+    val gptRoots = allRoots.filter { root ->
+      val packageName = root.packageName?.toString().orEmpty()
+      packageName.lowercase().contains("openai") || packageName.lowercase().contains("chatgpt")
+    }
+
+    appendDebugLog(
+      "WIDGET",
+      "TG_TO_GPT_ROOT_READY_CHECK all=${allRoots.size} tg=${telegramRoots.size} gpt=${gptRoots.size}"
+    )
+
+    return telegramRoots.isNotEmpty() && gptRoots.isNotEmpty()
+  }
+
   private fun isTelegramPackage(packageName: String): Boolean {
     return packageName.lowercase().contains("telegram")
   }
@@ -2631,6 +2650,11 @@ override fun onServiceConnected() {
     private var activeService: CopyBridgeAccessibilityService? = null
 
     fun isServiceActive(): Boolean = activeService != null
+
+    fun hasTelegramAndGptRootsForBridgeNow(): Boolean {
+      val service = activeService ?: return false
+      return service.hasTelegramAndGptRootsForBridgeNowInternal()
+    }
 
     fun requestCopyTelegramToAi(context: Context): Boolean =
       requestCopyTelegramToAi(context, COPY_MODE_FULL)
