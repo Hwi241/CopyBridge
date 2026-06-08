@@ -125,7 +125,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
     candidates.takeLast(5).forEachIndexed { index, item ->
       val rect = item.second
-      appendDebugLog("GPT→TG", "GPT_TEXT_CHANGE_NODE[$index] length=${item.first.length} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} preview=${compactLogPreview(item.first)}")
+      if (false) { appendDebugLog("GPT→TG", "GPT_TEXT_CHANGE_NODE[$index] length=${item.first.length} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} preview=${compactLogPreview(item.first)}") }
     }
 
     return signature
@@ -202,10 +202,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
       bottomBand.take(8).forEachIndexed { index, item ->
         val rect = item.second
-        appendDebugLog(
-          "GPT→TG",
-          "GPT_ACTION_ROW_NODE[$index] label=${compactLogPreview(item.first)} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
-        )
+        if (false) { appendDebugLog("GPT→TG", "GPT_ACTION_ROW_NODE[$index] label=${compactLogPreview(item.first)} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}") }
       }
 
       return false
@@ -233,10 +230,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
       bottomBand.take(8).forEachIndexed { index, item ->
         val rect = item.second
-        appendDebugLog(
-          "GPT→TG",
-          "GPT_ACTION_ROW_NODE[$index] label=${compactLogPreview(item.first)} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
-        )
+        if (false) { appendDebugLog("GPT→TG", "GPT_ACTION_ROW_NODE[$index] label=${compactLogPreview(item.first)} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}") }
       }
 
       return false
@@ -260,10 +254,12 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       actionTop >= latestTextRect.bottom - 20 &&
       gap <= 420
 
-    appendDebugLog(
-      "GPT→TG",
-      "GPT_ACTION_ROW_RELATION latestBottom=${latestTextRect.bottom} actionTop=$actionTop actionBottom=$actionBottom gap=$gap newerTextBelowAction=$newerTextBelowAction latestPreview=${compactLogPreview(latestTextPreview)}"
-    )
+    if (false) {
+      appendDebugLog(
+        "GPT→TG",
+        "GPT_ACTION_ROW_RELATION latestBottom=${latestTextRect.bottom} actionTop=$actionTop actionBottom=$actionBottom gap=$gap newerTextBelowAction=$newerTextBelowAction latestPreview=${compactLogPreview(latestTextPreview)}"
+      )
+    }
 
     val found = actionRowAttachedToLatestAnswer
 
@@ -278,10 +274,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
     bottomBand.take(8).forEachIndexed { index, item ->
       val rect = item.second
-      appendDebugLog(
-        "GPT→TG",
-        "GPT_ACTION_ROW_NODE[$index] label=${compactLogPreview(item.first)} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
-      )
+      if (false) { appendDebugLog("GPT→TG", "GPT_ACTION_ROW_NODE[$index] label=${compactLogPreview(item.first)} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}") }
     }
 
     return found
@@ -315,7 +308,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val roots = collectBridgeMonitorRoots()
 
     if (roots.isEmpty()) {
-      appendDebugLog("WIDGET", "BRIDGE_MONITOR_TICK roots=0 skipped=true")
+      if (false) { appendDebugLog("WIDGET", "BRIDGE_MONITOR_TICK roots=0 skipped=true") }
 
       return
     }
@@ -324,9 +317,9 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val tgRootsForMonitor = collectTelegramMonitorRoots()
     val gptRootsForMonitor = collectGptMonitorRoots()
 
-    appendDebugLog("WIDGET", "BRIDGE_MONITOR_ROOTS all=${allRoots.size} tg=${tgRootsForMonitor.size} gpt=${gptRootsForMonitor.size}")
+    if (false) { appendDebugLog("WIDGET", "BRIDGE_MONITOR_ROOTS all=${allRoots.size} tg=${tgRootsForMonitor.size} gpt=${gptRootsForMonitor.size}") }
 
-    if (tgRootsForMonitor.isEmpty() || gptRootsForMonitor.isEmpty()) {
+    if (false && (tgRootsForMonitor.isEmpty() || gptRootsForMonitor.isEmpty())) {
       allRoots.take(12).forEachIndexed { index, root ->
         val rect = android.graphics.Rect()
         root.getBoundsInScreen(rect)
@@ -343,7 +336,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       appendDebugLog("TG→GPT", "TELEGRAM_MONITOR_TYPING_DECISION exact=$tgExact topbar=$tgTopbar value=${tgExact || tgTopbar}")
       tgExact || tgTopbar
     } else {
-      appendDebugLog("WIDGET", "TELEGRAM_MONITOR_SKIPPED reason=noTelegramRoot")
+      if (false) { appendDebugLog("WIDGET", "TELEGRAM_MONITOR_SKIPPED reason=noTelegramRoot") }
       false
     }
 
@@ -428,7 +421,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         }
       }
     } else {
-      appendDebugLog("WIDGET", "GPT_MONITOR_SKIPPED reason=noGptRoot")
+      if (false) { appendDebugLog("WIDGET", "GPT_MONITOR_SKIPPED reason=noGptRoot") }
       lastBridgeMonitorGptBusy = false
     }
 
@@ -438,7 +431,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       previousGptBusy != (lastBridgeMonitorGptBusy ?: false) ||
       previousTelegramTyping != telegramTyping
 
-    appendDebugLog("WIDGET", "BRIDGE_MONITOR_TICK roots=${allRoots.size} gptStop=${gptRootsForMonitor.isNotEmpty() && hasExactShortGptBusyNodeForDecision(gptRootsForMonitor)} gptTextChanging=${lastBridgeMonitorGptBusy ?: false} telegramTyping=$telegramTyping")
+    if (false) { appendDebugLog("WIDGET", "BRIDGE_MONITOR_TICK roots=${allRoots.size} gptStop=${gptRootsForMonitor.isNotEmpty() && hasExactShortGptBusyNodeForDecision(gptRootsForMonitor)} gptTextChanging=${lastBridgeMonitorGptBusy ?: false} telegramTyping=$telegramTyping") }
 
     if (changed) {
       lastBridgeMonitorTelegramTyping = telegramTyping
@@ -1212,10 +1205,10 @@ override fun onServiceConnected() {
   private fun logTelegramTopBarSnapshotForDebug(
     roots: List<AccessibilityNodeInfo>
   ): Boolean {
-    appendDebugLog(
+    if (false) { appendDebugLog(
       "TG→GPT",
       "TELEGRAM_TOPBAR_SNAPSHOT roots=${roots.size}"
-    )
+    ) }
 
     val nodes = mutableListOf<AccessibilityNodeInfo>()
 
@@ -1248,10 +1241,10 @@ override fun onServiceConnected() {
       val label = buildNodeLabel(node)
       val rect = android.graphics.Rect()
       node.getBoundsInScreen(rect)
-      appendDebugLog(
+      if (false) { appendDebugLog(
         "TG→GPT",
         "TELEGRAM_TOPBAR_NODE[$index] label=${compactLogPreview(label)} length=${label.length} class=${node.className} clickable=${node.isClickable} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
-      )
+      ) }
     }
 
     val typingCandidates = deduped.filter { node ->
@@ -1264,10 +1257,10 @@ override fun onServiceConnected() {
       )
     }
 
-    appendDebugLog(
+    if (false) { appendDebugLog(
       "TG→GPT",
       "TELEGRAM_TOPBAR_TYPING_MATCH found=${typingCandidates.isNotEmpty()} candidates=${typingCandidates.size}"
-    )
+    ) }
 
     return typingCandidates.isNotEmpty()
   }
@@ -2662,7 +2655,7 @@ override fun onServiceConnected() {
     private const val TAG = "CopyBridgeA11y"
     private const val DEBUG_LOG_PREFS_NAME = "copybridge_debug_logs"
     private const val DEBUG_LOG_KEY = "logs"
-    private const val MAX_DEBUG_LOG_ENTRIES = 50
+    private const val MAX_DEBUG_LOG_ENTRIES = 150
     private const val MAX_COPY_LINES = 80
     private const val MAX_COPY_CHARS = 50000
     private const val MAX_SINGLE_LINE_LENGTH = 600
