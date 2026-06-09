@@ -301,6 +301,11 @@ export default function App() {
     0
   );
 
+  const apiUsageHourTotalUsage = apiUsageHourRows.reduce(
+    (sum, row) => sum + row.usageUsd,
+    0
+  );
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
@@ -556,9 +561,14 @@ export default function App() {
           {renderApiUsageHourNav()}
 
           <View style={styles.apiUsageListBox}>
-            <Text style={styles.apiUsagePlaceholderText}>
-              저장된 기록 {apiUsageRecords.length}개
-            </Text>
+            <View style={styles.apiUsageListHeader}>
+              <Text style={styles.apiUsagePlaceholderText}>
+                저장된 기록 {apiUsageRecords.length}개
+              </Text>
+              <Text style={styles.apiUsageTotalText}>
+                총 {apiUsageHourTotalUsage.toFixed(3)}
+              </Text>
+            </View>
 
             <View style={styles.apiUsageRowsBox}>
               {apiUsageHourRows.map((row) => {
@@ -590,7 +600,9 @@ export default function App() {
             </TouchableOpacity>
           </View>
 
-          {renderApiUsageHourNav()}
+          <View style={styles.apiUsageBottomNavWrap}>
+            {renderApiUsageHourNav()}
+          </View>
         </View>
 
         <Text style={styles.notice}>
@@ -1070,6 +1082,22 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     backgroundColor: '#171717',
     padding: 12,
+  },
+  apiUsageListHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  apiUsageTotalText: {
+    color: '#FACC15',
+    fontSize: 12,
+    fontWeight: '800',
+    textAlign: 'right',
+    fontVariant: ['tabular-nums'],
+  },
+  apiUsageBottomNavWrap: {
+    marginTop: 12,
   },
   apiUsageRowsBox: {
     marginTop: 10,
