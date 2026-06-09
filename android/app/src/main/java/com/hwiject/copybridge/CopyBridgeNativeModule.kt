@@ -289,17 +289,16 @@ class CopyBridgeNativeModule(
   }
 
   @ReactMethod
-  fun setCollapsedOpacity(value: Double, promise: Promise) {
+  fun getApiUsageMinutes(promise: Promise) {
     try {
-      val prefs = reactContext.getSharedPreferences("copybridge_floating_widget", Context.MODE_PRIVATE)
-      prefs.edit().putFloat("collapsed_opacity", value.toFloat()).apply()
-      val intent = Intent(reactContext, FloatingWidgetService::class.java).apply {
-        action = FloatingWidgetService.ACTION_REFRESH_WIDGET
-      }
-      reactContext.startService(intent)
-      promise.resolve(value)
+      val prefs = reactContext.getSharedPreferences(
+        "copybridge_api_usage_minutes",
+        Context.MODE_PRIVATE
+      )
+      val records = prefs.getString("minute_usage_records", "[]") ?: "[]"
+      promise.resolve(records)
     } catch (error: Exception) {
-      promise.reject("SET_COLLAPSED_OPACITY_FAILED", error)
+      promise.reject("API_USAGE_READ_FAILED", "Failed to read API usage minutes", error)
     }
   }
 }

@@ -24,6 +24,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 import kotlin.concurrent.thread
+import org.json.JSONArray
 import org.json.JSONObject
 
 class FloatingWidgetService : Service() {
@@ -774,6 +775,7 @@ class FloatingWidgetService : Service() {
 
         apiBalanceHandler.post {
           apiBalanceRefreshing = false
+          recordApiBalanceMinuteUsage(balance)
           val shouldBlink = shouldBlinkApiBalanceWarning(balance)
           apiBalanceText = "$" + displayText
           updateApiBalanceBoxText()
@@ -811,6 +813,61 @@ class FloatingWidgetService : Service() {
     }
 
     return fallbackBalance
+  }
+
+  private fun recordApiBalanceMinuteUsage(currentBalance: Double) {
+    val prefs = getSharedPreferences(API_USAGE_PREFS_NAME, MODE_PRIVATE)
+    val now = System.currentTimeMillis()
+    val minuteStart = now - (now % API_USAGE_MINUTE_MS)
+    val cutoff = now - API_USAGE_RETENTION_MS
+
+    val previousBalance = prefs
+      .getString(KEY_API_USAGE_LAST_BALANCE, null)
+      ?.toDoubleOrNull()
+
+    val minuteUsage = previousBalance
+      ?.let { (it - currentBalance).coerceAtLeast(0.0) }
+      ?: 0.0
+
+    val oldArray = try {
+      JSONArray(prefs.getString(KEY_API_USAGE_RECORDS, "[]") ?: "[]")
+    } catch (_: Exception) {
+      JSONArray()
+    }
+
+    val usageByMinute = linkedMapOf<Long, Double>()
+
+    for (index in 0 until oldArray.length()) {
+      val item = oldArray.optJSONObject(index) ?: continue
+      val savedMinute = item.optLong("minuteStart", -1L)
+      val savedUsage = item.optDouble("usageUsd", 0.0).coerceAtLeast(0.0)
+
+      if (savedMinute >= cutoff) {
+        usageByMinute[savedMinute] = (usageByMinute[savedMinute] ?: 0.0) + savedUsage
+      }
+    }
+
+    usageByMinute[minuteStart] = (usageByMinute[minuteStart] ?: 0.0) + minuteUsage
+
+    val newArray = JSONArray()
+    for (savedMinute in usageByMinute.keys.sorted()) {
+      newArray.put(
+        JSONObject()
+          .put("minuteStart", savedMinute)
+          .put("usageUsd", usageByMinute[savedMinute] ?: 0.0)
+      )
+    }
+
+    prefs.edit()
+      .putString(KEY_API_USAGE_RECORDS, newArray.toString())
+      .putString(KEY_API_USAGE_LAST_BALANCE, currentBalance.toString())
+      .putLong(KEY_API_USAGE_LAST_MINUTE, minuteStart)
+      .apply()
+
+    appendDebugLog(
+      "WIDGET",
+      "API_USAGE_MINUTE_RECORD minuteStart=$minuteStart usageUsd=${String.format(Locale.US, "%.6f", minuteUsage)} records=${newArray.length()}"
+    )
   }
 
   private fun shouldBlinkApiBalanceWarning(currentBalance: Double): Boolean {
@@ -1037,5 +1094,11 @@ class FloatingWidgetService : Service() {
     private const val API_BALANCE_ONE_MINUTE_DROP_WARNING_USD = 0.10
     private const val API_BALANCE_BLINK_INTERVAL_MS = 500L
     private const val API_BALANCE_BLINK_COUNT = 6
+    private const val API_USAGE_PREFS_NAME = "copybridge_api_usage_minutes"
+    private const val KEY_API_USAGE_RECORDS = "minute_usage_records"
+    private const val KEY_API_USAGE_LAST_BALANCE = "last_balance"
+    private const val KEY_API_USAGE_LAST_MINUTE = "last_minute_start"
+    private const val API_USAGE_MINUTE_MS = 60_000L
+    private const val API_USAGE_RETENTION_MS = 24 * 60 * 60_000L
   }
 }

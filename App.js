@@ -14,6 +14,9 @@ import {
 } from 'react-native';
 
 const OPACITY_PRESETS = [1, 0.85, 0.7, 0.55];
+const API_USAGE_HOUR_MS = 60 * 60 * 1000;
+const API_USAGE_MINUTE_MS = 60 * 1000;
+const API_USAGE_ROWS_PER_HOUR = 60;
 
 export default function App() {
   const [debugLogs, setDebugLogs] = useState('');
@@ -22,6 +25,8 @@ export default function App() {
   const [deepSeekApiKey, setDeepSeekApiKey] = useState('');
   const [deepSeekKeyStatus, setDeepSeekKeyStatus] = useState('$KEY');
   const [deepSeekBalanceStatus, setDeepSeekBalanceStatus] = useState('$KEY');
+  const [apiUsageHourOffset, setApiUsageHourOffset] = useState(0);
+  const [apiUsageRecords, setApiUsageRecords] = useState([]);
 
   const getNativeModule = () => NativeModules.CopyBridgeNativeModule;
 
@@ -100,6 +105,31 @@ export default function App() {
     }
   };
 
+  const loadApiUsageRecords = useCallback(async () => {
+    const nativeModule = getNativeModule();
+    if (Platform.OS !== 'android' || !nativeModule || typeof nativeModule.getApiUsageMinutes !== 'function') {
+      setApiUsageRecords([]);
+      return;
+    }
+    try {
+      const raw = await nativeModule.getApiUsageMinutes();
+      const parsed = JSON.parse(raw || '[]');
+      if (!Array.isArray(parsed)) {
+        setApiUsageRecords([]);
+        return;
+      }
+      const safeRecords = parsed
+        .map((item) => ({
+          minuteStart: Number(item.minuteStart),
+          usageUsd: Math.max(0, Number(item.usageUsd || 0)),
+        }))
+        .filter((item) => Number.isFinite(item.minuteStart) && Number.isFinite(item.usageUsd));
+      setApiUsageRecords(safeRecords);
+    } catch (error) {
+      setApiUsageRecords([]);
+    }
+  }, []);
+
   const checkDeepSeekBalance = async () => {
     const nativeModule = getNativeModule();
     if (Platform.OS !== 'android') {
@@ -120,6 +150,8 @@ export default function App() {
       }
     } catch (error) {
       setDeepSeekBalanceStatus('$ERR');
+    } finally {
+      await loadApiUsageRecords();
     }
   };
 
@@ -166,7 +198,12 @@ export default function App() {
     }
   };
 
-  useEffect(() => { loadDebugLogs(); loadOpacitySettings(); loadDeepSeekSettings(); }, [loadDebugLogs, loadOpacitySettings, loadDeepSeekSettings]);
+  useEffect(() => {
+    loadDebugLogs();
+    loadOpacitySettings();
+    loadDeepSeekSettings();
+    loadApiUsageRecords();
+  }, [loadDebugLogs, loadOpacitySettings, loadDeepSeekSettings, loadApiUsageRecords]);
   const showNextStepAlert = (label) => {
     Alert.alert(
       '다음 단계에서 연결',
@@ -197,6 +234,72 @@ export default function App() {
       Alert.alert('실행 실패', `${label} 기능을 실행하지 못했습니다.`);
     }
   };
+
+  const changeApiUsageHour = (direction) => {
+    setApiUsageHourOffset((current) => {
+      const next = current + direction;
+      if (next < 0) return 0;
+      if (next > 23) return 23;
+      return next;
+    });
+  };
+
+  const renderApiUsageHourNav = () => (
+    <View style={styles.apiUsageNavRow}>
+      <TouchableOpacity
+        style={styles.apiUsageNavButton}
+        activeOpacity={0.8}
+        onPress={() => changeApiUsageHour(1)}
+      >
+        <Text style={styles.apiUsageNavButtonText}>‹ 이전 시간</Text>
+      </TouchableOpacity>
+
+      <Text style={styles.apiUsageHourTitle}>
+        {apiUsageHourOffset === 0 ? '현재 시간' : `${apiUsageHourOffset}시간 전`}
+      </Text>
+
+      <TouchableOpacity
+        style={[
+          styles.apiUsageNavButton,
+          apiUsageHourOffset === 0 && styles.apiUsageNavButtonDisabled,
+        ]}
+        activeOpacity={0.8}
+        disabled={apiUsageHourOffset === 0}
+        onPress={() => changeApiUsageHour(-1)}
+      >
+        <Text style={styles.apiUsageNavButtonText}>다음 시간 ›</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
+  const apiUsageHourRows = (() => {
+    const now = Date.now();
+    const currentHourStart = now - (now % API_USAGE_HOUR_MS);
+    const hourStart = currentHourStart - apiUsageHourOffset * API_USAGE_HOUR_MS;
+
+    const usageMap = new Map();
+    apiUsageRecords.forEach((item) => {
+      usageMap.set(item.minuteStart, (usageMap.get(item.minuteStart) || 0) + item.usageUsd);
+    });
+
+    return Array.from({ length: API_USAGE_ROWS_PER_HOUR }, (_, index) => {
+      const minuteStart = hourStart + index * API_USAGE_MINUTE_MS;
+      const date = new Date(minuteStart);
+      const hour = String(date.getHours()).padStart(2, '0');
+      const minute = String(date.getMinutes()).padStart(2, '0');
+
+      return {
+        key: String(minuteStart),
+        timeLabel: `${hour}:${minute}`,
+        usageUsd: usageMap.get(minuteStart) || 0,
+      };
+    });
+  })();
+
+  const apiUsageHourMaxUsage = Math.max(
+    ...apiUsageHourRows.map((row) => row.usageUsd),
+    0
+  );
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -442,6 +545,52 @@ export default function App() {
               <Text style={styles.logActionButtonText}>로그 비우기</Text>
             </TouchableOpacity>
           </View>
+        </View>
+
+        <View style={styles.apiUsageCard}>
+          <Text style={styles.sectionTitle}>API 1분 사용량</Text>
+          <Text style={styles.apiUsageDescription}>
+            최근 24시간 API 사용량을 1분 단위로 확인하는 영역입니다.
+          </Text>
+
+          {renderApiUsageHourNav()}
+
+          <View style={styles.apiUsageListBox}>
+            <Text style={styles.apiUsagePlaceholderText}>
+              저장된 기록 {apiUsageRecords.length}개
+            </Text>
+
+            <View style={styles.apiUsageRowsBox}>
+              {apiUsageHourRows.map((row) => {
+                const ratio = apiUsageHourMaxUsage > 0 ? row.usageUsd / apiUsageHourMaxUsage : 0;
+                const barWidth = `${Math.max(4, Math.round(ratio * 100))}%`;
+                const isZero = row.usageUsd <= 0;
+                return (
+                  <View key={row.key} style={styles.apiUsageTextRow}>
+                    <Text style={styles.apiUsageTimeText}>{row.timeLabel}</Text>
+                    <View style={styles.apiUsageBarTrack}>
+                      {isZero ? (
+                        <View style={styles.apiUsageZeroDot} />
+                      ) : (
+                        <View style={[styles.apiUsageBarFill, { width: barWidth }]} />
+                      )}
+                    </View>
+                    <Text style={styles.apiUsageAmountText}>{row.usageUsd.toFixed(3)}</Text>
+                  </View>
+                );
+              })}
+            </View>
+
+            <TouchableOpacity
+              style={styles.apiUsageRefreshButton}
+              activeOpacity={0.8}
+              onPress={loadApiUsageRecords}
+            >
+              <Text style={styles.apiUsageRefreshButtonText}>사용량 새로고침</Text>
+            </TouchableOpacity>
+          </View>
+
+          {renderApiUsageHourNav()}
         </View>
 
         <Text style={styles.notice}>
@@ -854,6 +1003,125 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   logActionButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  apiUsageCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 18,
+    marginBottom: 18,
+    shadowColor: '#000000',
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 3,
+  },
+  apiUsageDescription: {
+    marginTop: -8,
+    marginBottom: 12,
+    fontSize: 13,
+    lineHeight: 19,
+    color: '#817A70',
+  },
+  apiUsageNavRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    marginBottom: 10,
+  },
+  apiUsageNavButton: {
+    flex: 1,
+    backgroundColor: '#333333',
+    borderRadius: 12,
+    paddingVertical: 8,
+    alignItems: 'center',
+  },
+  apiUsageNavButtonDisabled: {
+    opacity: 0.35,
+  },
+  apiUsageNavButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  apiUsageHourTitle: {
+    minWidth: 74,
+    textAlign: 'center',
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#222222',
+  },
+  apiUsagePlaceholderBox: {
+    minHeight: 96,
+    borderRadius: 14,
+    backgroundColor: '#171717',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  apiUsagePlaceholderText: {
+    color: '#F7F4EF',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  apiUsageListBox: {
+    borderRadius: 14,
+    backgroundColor: '#171717',
+    padding: 12,
+  },
+  apiUsageRowsBox: {
+    marginTop: 10,
+    marginBottom: 10,
+  },
+  apiUsageTextRow: {
+    height: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  apiUsageTimeText: {
+    width: 48,
+    fontSize: 10,
+    color: '#D6D3CC',
+    fontVariant: ['tabular-nums'],
+  },
+  apiUsageBarTrack: {
+    flex: 1,
+    height: 6,
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+    marginHorizontal: 8,
+  },
+  apiUsageBarFill: {
+    height: 5,
+    minWidth: 4,
+    borderRadius: 3,
+    backgroundColor: '#FACC15',
+  },
+  apiUsageZeroDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#6B7280',
+  },
+  apiUsageAmountText: {
+    width: 54,
+    textAlign: 'right',
+    fontSize: 10,
+    color: '#F7F4EF',
+    fontVariant: ['tabular-nums'],
+  },
+  apiUsageRefreshButton: {
+    marginTop: 12,
+    backgroundColor: '#333333',
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  apiUsageRefreshButtonText: {
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '700',
