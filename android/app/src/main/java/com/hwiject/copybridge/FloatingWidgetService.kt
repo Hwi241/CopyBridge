@@ -581,7 +581,7 @@ class FloatingWidgetService : Service() {
     val entries = oldLogs.split("\n---\n").filter { it.isNotBlank() }.toMutableList()
     val time = android.text.format.DateFormat.format("HH:mm:ss", System.currentTimeMillis()).toString()
     entries.add("[$time][$category] $message")
-    val trimmed = entries.takeLast(50).joinToString("\n---\n")
+    val trimmed = entries.takeLast(500).joinToString("\n---\n")
     prefs.edit().putString("logs", trimmed).apply()
   }
 
@@ -836,18 +836,24 @@ class FloatingWidgetService : Service() {
     }
 
     val usageByMinute = linkedMapOf<Long, Double>()
+    val balanceByMinute = linkedMapOf<Long, Double>()
 
     for (index in 0 until oldArray.length()) {
       val item = oldArray.optJSONObject(index) ?: continue
       val savedMinute = item.optLong("minuteStart", -1L)
       val savedUsage = item.optDouble("usageUsd", 0.0).coerceAtLeast(0.0)
+      val savedBalance = item.optDouble("balanceUsd", Double.NaN)
 
       if (savedMinute >= cutoff) {
         usageByMinute[savedMinute] = (usageByMinute[savedMinute] ?: 0.0) + savedUsage
+        if (!savedBalance.isNaN()) {
+          balanceByMinute[savedMinute] = savedBalance
+        }
       }
     }
 
     usageByMinute[minuteStart] = (usageByMinute[minuteStart] ?: 0.0) + minuteUsage
+    balanceByMinute[minuteStart] = currentBalance
 
     val newArray = JSONArray()
     for (savedMinute in usageByMinute.keys.sorted()) {
@@ -855,6 +861,7 @@ class FloatingWidgetService : Service() {
         JSONObject()
           .put("minuteStart", savedMinute)
           .put("usageUsd", usageByMinute[savedMinute] ?: 0.0)
+          .put("balanceUsd", balanceByMinute[savedMinute] ?: JSONObject.NULL)
       )
     }
 

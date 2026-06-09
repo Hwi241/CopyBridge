@@ -122,8 +122,15 @@ export default function App() {
         .map((item) => ({
           minuteStart: Number(item.minuteStart),
           usageUsd: Math.max(0, Number(item.usageUsd || 0)),
+          balanceUsd: item.balanceUsd === null || item.balanceUsd === undefined
+            ? null
+            : Number(item.balanceUsd),
         }))
-        .filter((item) => Number.isFinite(item.minuteStart) && Number.isFinite(item.usageUsd));
+        .filter((item) => (
+          Number.isFinite(item.minuteStart) &&
+          Number.isFinite(item.usageUsd) &&
+          (item.balanceUsd === null || Number.isFinite(item.balanceUsd))
+        ));
       setApiUsageRecords(safeRecords);
     } catch (error) {
       setApiUsageRecords([]);
@@ -278,8 +285,12 @@ export default function App() {
     const hourStart = currentHourStart - apiUsageHourOffset * API_USAGE_HOUR_MS;
 
     const usageMap = new Map();
+    const balanceMap = new Map();
     apiUsageRecords.forEach((item) => {
       usageMap.set(item.minuteStart, (usageMap.get(item.minuteStart) || 0) + item.usageUsd);
+      if (item.balanceUsd !== null) {
+        balanceMap.set(item.minuteStart, item.balanceUsd);
+      }
     });
 
     return Array.from({ length: API_USAGE_ROWS_PER_HOUR }, (_, index) => {
@@ -292,6 +303,7 @@ export default function App() {
         key: String(minuteStart),
         timeLabel: `${hour}:${minute}`,
         usageUsd: usageMap.get(minuteStart) || 0,
+        balanceUsd: balanceMap.has(minuteStart) ? balanceMap.get(minuteStart) : null,
       };
     });
   })();
@@ -305,6 +317,10 @@ export default function App() {
     (sum, row) => sum + row.usageUsd,
     0
   );
+
+  const apiUsageHourLastBalance = [...apiUsageHourRows]
+    .reverse()
+    .find((row) => row.balanceUsd !== null)?.balanceUsd ?? null;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -563,7 +579,9 @@ export default function App() {
           <View style={styles.apiUsageListBox}>
             <View style={styles.apiUsageListHeader}>
               <Text style={styles.apiUsagePlaceholderText}>
-                저장된 기록 {apiUsageRecords.length}개
+                {apiUsageHourLastBalance === null
+                  ? '잔액 -'
+                  : `잔액 ${apiUsageHourLastBalance.toFixed(3)}`}
               </Text>
               <Text style={styles.apiUsageTotalText}>
                 총 {apiUsageHourTotalUsage.toFixed(3)}
