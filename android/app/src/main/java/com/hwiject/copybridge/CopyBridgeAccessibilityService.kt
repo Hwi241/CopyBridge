@@ -651,6 +651,7 @@ override fun onServiceConnected() {
 
           if (thirdSent) {
             Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode + 전송", Toast.LENGTH_SHORT).show()
+            hideTelegramKeyboardBySafeChatTapAfterSend("thirdSent")
           } else {
             val debug = buildTelegramCopyDebugInfo(thirdRoots)
             copyToClipboard(debug)
@@ -663,6 +664,52 @@ override fun onServiceConnected() {
         }, 350L)
       }, 350L)
     }, 450L)
+  }
+
+  private fun hideTelegramKeyboardBySafeChatTapAfterSend(
+    source: String
+  ) {
+    Handler(Looper.getMainLooper()).postDelayed({
+      val telegramRoots = getTelegramRoots()
+      val root = telegramRoots.firstOrNull()
+
+      if (root == null) {
+        appendDebugLog(
+          "GPT→TG",
+          "TELEGRAM_KEYBOARD_SAFE_TAP_AFTER_SEND source=$source skipped=true reason=noTelegramRoot"
+        )
+        return@postDelayed
+      }
+
+      val rect = Rect()
+      root.getBoundsInScreen(rect)
+
+      if (rect.isEmpty()) {
+        appendDebugLog(
+          "GPT→TG",
+          "TELEGRAM_KEYBOARD_SAFE_TAP_AFTER_SEND source=$source skipped=true reason=emptyRootBounds"
+        )
+        return@postDelayed
+      }
+
+      val tapX = rect.left + (rect.width() * 0.50f)
+      val tapY = rect.top + (rect.height() * 0.42f)
+
+      val path = android.graphics.Path().apply {
+        moveTo(tapX, tapY)
+      }
+
+      val gesture = android.accessibilityservice.GestureDescription.Builder()
+        .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0L, 70L))
+        .build()
+
+      val dispatched = dispatchGesture(gesture, null, null)
+
+      appendDebugLog(
+        "GPT→TG",
+        "TELEGRAM_KEYBOARD_SAFE_TAP_AFTER_SEND source=$source dispatched=$dispatched tapX=${tapX.toInt()} tapY=${tapY.toInt()} rootBounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      )
+    }, 350L)
   }
 
   private fun getTelegramRoots(): List<AccessibilityNodeInfo> {
@@ -734,17 +781,58 @@ override fun onServiceConnected() {
   private fun collectTelegramMessageCandidates(
     roots: List<AccessibilityNodeInfo>
   ): List<TextCandidate> {
-    val rawCandidates = mutableListOf<TextCandidate>()
+    val primaryCandidates = mutableListOf<TextCandidate>()
+    val broadCandidates = mutableListOf<TextCandidate>()
 
     roots.forEach { root ->
       val rootRect = Rect()
       root.getBoundsInScreen(rootRect)
       if (!rootRect.isEmpty()) {
-        collectVisibleMessageTextCandidates(root, rootRect, rawCandidates)
+        collectVisibleMessageTextCandidates(root, rootRect, primaryCandidates)
+        collectTelegramBroadTextCandidates(root, rootRect, broadCandidates)
       }
     }
 
-    val sorted = rawCandidates
+    val primarySorted = normalizeTelegramMessageCandidates(primaryCandidates)
+    val broadSorted = normalizeTelegramMessageCandidates(broadCandidates)
+
+    val chosenSorted = if (primarySorted.isNotEmpty()) {
+      appendDebugLog(
+        "TG→GPT",
+        "TG_TO_GPT_CANDIDATE_SOURCE source=primary primary=${primarySorted.size} broad=${broadSorted.size}"
+      )
+      primarySorted
+    } else {
+      appendDebugLog(
+        "TG→GPT",
+        "TG_TO_GPT_CANDIDATE_SOURCE source=broadFallback primary=0 broad=${broadSorted.size}"
+      )
+      broadSorted
+    }
+
+    val result = mutableListOf<TextCandidate>()
+    var previousText = ""
+
+    chosenSorted.forEach { candidate ->
+      if (candidate.text == previousText) return@forEach
+      result.add(candidate)
+      previousText = candidate.text
+    }
+
+    val finalResult = result.takeLast(MAX_COPY_LINES)
+
+    appendDebugLog(
+      "TG→GPT",
+      "TG_TO_GPT_CANDIDATE_RESULT chosen=${chosenSorted.size} final=${finalResult.size} preview=${compactLogPreview(finalResult.joinToString("\\n") { it.text })}"
+    )
+
+    return finalResult
+  }
+
+  private fun normalizeTelegramMessageCandidates(
+    candidates: List<TextCandidate>
+  ): List<TextCandidate> {
+    return candidates
       .mapNotNull { candidate ->
         val cleaned = normalizeTelegramTextForGptPreserveLines(candidate.text)
         if (cleaned.isBlank()) return@mapNotNull null
@@ -752,17 +840,6 @@ override fun onServiceConnected() {
         candidate.copy(text = cleaned)
       }
       .sortedWith(compareBy<TextCandidate> { it.top }.thenBy { it.left })
-
-    val result = mutableListOf<TextCandidate>()
-    var previousText = ""
-
-    sorted.forEach { candidate ->
-      if (candidate.text == previousText) return@forEach
-      result.add(candidate)
-      previousText = candidate.text
-    }
-
-    return result.takeLast(MAX_COPY_LINES)
   }
 
   private fun dedupeCodeTextForTelegramFinal(codeText: String): String {

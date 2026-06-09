@@ -576,6 +576,14 @@ export default function App() {
 
           {renderApiUsageHourNav()}
 
+          <TouchableOpacity
+            style={styles.apiUsageTopRefreshButton}
+            activeOpacity={0.8}
+            onPress={loadApiUsageRecords}
+          >
+            <Text style={styles.apiUsageRefreshButtonText}>사용량 새로고침</Text>
+          </TouchableOpacity>
+
           <View style={styles.apiUsageListBox}>
             <View style={styles.apiUsageListHeader}>
               <Text style={styles.apiUsagePlaceholderText}>
@@ -833,6 +841,7 @@ const styles = StyleSheet.create({
   },
   actions: {
     marginTop: 4,
+    marginBottom: 18,
     gap: 12,
   },
   primaryButton: {
@@ -1116,6 +1125,15 @@ const styles = StyleSheet.create({
   },
   apiUsageBottomNavWrap: {
     marginTop: 12,
+  },
+  apiUsageTopRefreshButton: {
+    marginTop: 2,
+    marginBottom: 12,
+    backgroundColor: '#333333',
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    alignItems: 'center',
   },
   apiUsageRowsBox: {
     marginTop: 10,
