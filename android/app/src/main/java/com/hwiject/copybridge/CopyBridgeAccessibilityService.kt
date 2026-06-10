@@ -421,8 +421,35 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
         }
       }
     } else {
-      if (false) { appendDebugLog("WIDGET", "GPT_MONITOR_SKIPPED reason=noGptRoot") }
-      lastBridgeMonitorGptBusy = false
+      val nowMs = System.currentTimeMillis()
+      val stopAgeMs = if (lastBridgeMonitorGptStopSeenAtMs > 0L) {
+        nowMs - lastBridgeMonitorGptStopSeenAtMs
+      } else {
+        -1L
+      }
+      val activityAgeMs = if (lastBridgeMonitorGptActivityAtMs > 0L) {
+        nowMs - lastBridgeMonitorGptActivityAtMs
+      } else {
+        -1L
+      }
+      val recentStopSeen = stopAgeMs in 0L..bridgeGptRecentStopHoldMs
+      val recentActivitySeen = activityAgeMs in 0L..bridgeGptRecentStopHoldMs
+
+      if (previousGptBusy && (recentStopSeen || recentActivitySeen)) {
+        lastBridgeMonitorGptBusy = true
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_MONITOR_MISSING_ROOT_KEEP_BUSY previousBusy=$previousGptBusy recentStop=$recentStopSeen stopAgeMs=$stopAgeMs recentActivity=$recentActivitySeen activityAgeMs=$activityAgeMs"
+        )
+      } else {
+        if (previousGptBusy) {
+          appendDebugLog(
+            "GPT→TG",
+            "GPT_MONITOR_MISSING_ROOT_CLEAR_BUSY previousBusy=$previousGptBusy recentStop=$recentStopSeen stopAgeMs=$stopAgeMs recentActivity=$recentActivitySeen activityAgeMs=$activityAgeMs"
+          )
+        }
+        lastBridgeMonitorGptBusy = false
+      }
     }
 
     val previousTelegramTyping = lastBridgeMonitorTelegramTyping ?: false
@@ -625,6 +652,7 @@ override fun onServiceConnected() {
 
       if (firstSent) {
         Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode + 전송", Toast.LENGTH_SHORT).show()
+        hideTelegramKeyboardBySafeChatTapAfterSend("firstSent")
         return@postDelayed
       }
 
@@ -638,6 +666,7 @@ override fun onServiceConnected() {
 
         if (secondSent) {
           Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode + 전송", Toast.LENGTH_SHORT).show()
+          hideTelegramKeyboardBySafeChatTapAfterSend("secondSent")
           return@postDelayed
         }
 
@@ -793,19 +822,39 @@ override fun onServiceConnected() {
       }
     }
 
+    logTelegramCandidateDebug("primaryRaw", primaryCandidates)
+    logTelegramCandidateDebug("broadRaw", broadCandidates)
+
     val primarySorted = normalizeTelegramMessageCandidates(primaryCandidates)
     val broadSorted = normalizeTelegramMessageCandidates(broadCandidates)
+
+    logTelegramCandidateDebug("primaryNormalized", primarySorted)
+    logTelegramCandidateDebug("broadNormalized", broadSorted)
+
+    val primaryRecovered = if (primarySorted.isEmpty() && primaryCandidates.isNotEmpty()) {
+      recoverTelegramPrimaryRawCandidates(primaryCandidates)
+    } else {
+      emptyList()
+    }
+
+    logTelegramCandidateDebug("primaryRecovered", primaryRecovered)
 
     val chosenSorted = if (primarySorted.isNotEmpty()) {
       appendDebugLog(
         "TG→GPT",
-        "TG_TO_GPT_CANDIDATE_SOURCE source=primary primary=${primarySorted.size} broad=${broadSorted.size}"
+        "TG_TO_GPT_CANDIDATE_SOURCE source=primary primary=${primarySorted.size} broad=${broadSorted.size} recovered=${primaryRecovered.size}"
       )
       primarySorted
+    } else if (primaryRecovered.isNotEmpty()) {
+      appendDebugLog(
+        "TG→GPT",
+        "TG_TO_GPT_CANDIDATE_SOURCE source=primaryRawRecover primary=0 recovered=${primaryRecovered.size} broad=${broadSorted.size}"
+      )
+      primaryRecovered
     } else {
       appendDebugLog(
         "TG→GPT",
-        "TG_TO_GPT_CANDIDATE_SOURCE source=broadFallback primary=0 broad=${broadSorted.size}"
+        "TG_TO_GPT_CANDIDATE_SOURCE source=broadFallback primary=0 recovered=0 broad=${broadSorted.size}"
       )
       broadSorted
     }
@@ -827,6 +876,49 @@ override fun onServiceConnected() {
     )
 
     return finalResult
+  }
+
+  private fun logTelegramCandidateDebug(
+    source: String,
+    candidates: List<TextCandidate>
+  ) {
+    appendDebugLog(
+      "TG→GPT",
+      "TG_TO_GPT_CANDIDATE_DETAIL source=$source count=${candidates.size}"
+    )
+
+    candidates.takeLast(12).forEachIndexed { index, candidate ->
+      appendDebugLog(
+        "TG→GPT",
+        "TG_TO_GPT_CANDIDATE_DETAIL[$source][$index] textLength=${candidate.text.length} bounds=${candidate.left},${candidate.top},${candidate.right},${candidate.bottom} preview=${compactLogPreview(candidate.text)}"
+      )
+    }
+  }
+
+  private fun recoverTelegramPrimaryRawCandidates(
+    candidates: List<TextCandidate>
+  ): List<TextCandidate> {
+    val recovered = candidates.mapNotNull { candidate ->
+      val keptLines = normalizeTelegramTextForGptPreserveLines(candidate.text)
+        .lines()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .filter { !shouldIgnoreMessageText(it) }
+
+      val joined = keptLines.joinToString("\n").trim()
+      if (joined.isBlank()) {
+        null
+      } else {
+        candidate.copy(text = joined)
+      }
+    }.sortedWith(compareBy<TextCandidate> { it.top }.thenBy { it.left })
+
+    appendDebugLog(
+      "TG→GPT",
+      "TG_TO_GPT_PRIMARY_RAW_RECOVER before=${candidates.size} after=${recovered.size} preview=${compactLogPreview(recovered.joinToString("\n") { it.text })}"
+    )
+
+    return recovered
   }
 
   private fun normalizeTelegramMessageCandidates(
