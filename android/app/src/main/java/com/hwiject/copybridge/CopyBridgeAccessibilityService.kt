@@ -1518,45 +1518,18 @@ override fun onServiceConnected() {
   private fun collectTelegramFullModeTexts(
     roots: List<AccessibilityNodeInfo>
   ): List<String> {
-    val primaryCandidates = mutableListOf<TextCandidate>()
-    val broadCandidates = mutableListOf<TextCandidate>()
-
-    roots.forEach { root ->
-      val rootRect = Rect()
-      root.getBoundsInScreen(rootRect)
-      if (!rootRect.isEmpty()) {
-        collectVisibleMessageTextCandidates(root, rootRect, primaryCandidates)
-        collectTelegramBroadTextCandidates(root, rootRect, broadCandidates)
-      }
-    }
-
-    val primaryTexts = normalizeTelegramTextCandidates(primaryCandidates)
-    val broadTexts = normalizeTelegramTextCandidates(broadCandidates)
-
-    val chosenTexts = if (primaryTexts.size >= 2) {
-      primaryTexts
-    } else if (broadTexts.size >= primaryTexts.size) {
-      broadTexts
-    } else {
-      primaryTexts
-    }
-
-    val result = mutableListOf<String>()
-    chosenTexts.forEach { text ->
-      addUniqueTelegramText(result, text)
-    }
-
-    val finalResult = result.takeLast(MAX_COPY_LINES)
+    val candidates = collectTelegramMessageCandidates(roots)
+    val finalResult = candidates.map { it.text }
 
     appendDebugLog(
-      "TG\u2192GPT",
-      "fullCollect primary=${primaryTexts.size} broad=${broadTexts.size} final=${finalResult.size} preview=${compactLogPreview(finalResult.joinToString("\\n"))}"
+      "TG→GPT",
+      "fullCollect source=collectTelegramMessageCandidates final=${finalResult.size} preview=${compactLogPreview(finalResult.joinToString("\\n"))}"
     )
 
     return finalResult
   }
 
-  private fun normalizeTelegramTextCandidates(
+ private fun normalizeTelegramTextCandidates(
     candidates: List<TextCandidate>
   ): List<String> {
     return candidates
