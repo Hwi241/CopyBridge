@@ -695,6 +695,9 @@ override fun onServiceConnected() {
     }, 450L)
   }
 
+  private var lastTelegramClearFocusStillFocusedAtMs: Long = 0L
+  private var lastTelegramClearFocusStillFocusedSource: String = ""
+
   private fun clearTelegramInputFocusAfterSend(source: String): Boolean {
     val roots = getTelegramRoots()
     if (roots.isEmpty()) {
@@ -728,10 +731,16 @@ override fun onServiceConnected() {
     val rect = android.graphics.Rect()
     targetNode.getBoundsInScreen(rect)
     val result = targetNode.performAction(AccessibilityNodeInfo.ACTION_CLEAR_FOCUS)
+    val stillFocused = targetNode.isFocused
+
+    if (stillFocused) {
+      lastTelegramClearFocusStillFocusedAtMs = System.currentTimeMillis()
+      lastTelegramClearFocusStillFocusedSource = source
+    }
 
     appendDebugLog(
       "GPT→TG",
-      "TELEGRAM_INPUT_CLEAR_FOCUS_AFTER_SEND source=$source result=$result focused=${targetNode.isFocused} editNodes=${editNodes.size} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      "TELEGRAM_INPUT_CLEAR_FOCUS_AFTER_SEND source=$source result=$result focused=$stillFocused editNodes=${editNodes.size} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
     )
 
     return result
@@ -850,27 +859,51 @@ override fun onServiceConnected() {
       collectTelegramEditTextNodes(root, editNodes)
     }
 
+    val now = System.currentTimeMillis()
+    val clearFocusAgeMs = if (lastTelegramClearFocusStillFocusedAtMs > 0L) {
+      now - lastTelegramClearFocusStillFocusedAtMs
+    } else {
+      -1L
+    }
+    val recentStubbornFocus = clearFocusAgeMs in 0L..1800L &&
+      lastTelegramClearFocusStillFocusedSource == source
+
     val focusedNode = editNodes.firstOrNull { it.isFocused }
-    if (focusedNode == null) {
+
+    if (focusedNode == null && !recentStubbornFocus) {
       appendDebugLog(
         "GPT→TG",
-        "TELEGRAM_KEYBOARD_BACK_AFTER_SEND_SKIPPED source=$source reason=noFocusedEditText editNodes=${editNodes.size}"
+        "TELEGRAM_KEYBOARD_BACK_AFTER_SEND_SKIPPED source=$source reason=noFocusedEditTextAndNoRecentStubbornFocus editNodes=${editNodes.size} clearFocusAgeMs=$clearFocusAgeMs"
+      )
+      return false
+    }
+
+    val targetNode = focusedNode ?: editNodes.maxByOrNull { node ->
+      val rect = android.graphics.Rect()
+      node.getBoundsInScreen(rect)
+      rect.bottom
+    }
+
+    if (targetNode == null) {
+      appendDebugLog(
+        "GPT→TG",
+        "TELEGRAM_KEYBOARD_BACK_AFTER_SEND_SKIPPED source=$source reason=noEditText editNodes=0 clearFocusAgeMs=$clearFocusAgeMs recentStubbornFocus=$recentStubbornFocus"
       )
       return false
     }
 
     val rect = android.graphics.Rect()
-    focusedNode.getBoundsInScreen(rect)
+    targetNode.getBoundsInScreen(rect)
 
+    val reason = if (focusedNode != null) "focusedEditText" else "recentStubbornFocus"
     val result = performGlobalAction(GLOBAL_ACTION_BACK)
     appendDebugLog(
       "GPT→TG",
-      "TELEGRAM_KEYBOARD_BACK_AFTER_SEND source=$source result=$result focused=true editNodes=${editNodes.size} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      "TELEGRAM_KEYBOARD_BACK_AFTER_SEND source=$source result=$result reason=$reason editNodes=${editNodes.size} clearFocusAgeMs=$clearFocusAgeMs recentStubbornFocus=$recentStubbornFocus bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
     )
 
     return result
   }
-
   private fun getTelegramRoots(): List<AccessibilityNodeInfo> {
     val candidates = mutableListOf<AccessibilityNodeInfo>()
 
