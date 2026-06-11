@@ -784,6 +784,12 @@ override fun onServiceConnected() {
       val editNodes = mutableListOf<AccessibilityNodeInfo>()
       collectTelegramEditTextNodes(root, editNodes)
 
+      val editRects = editNodes.mapNotNull { node ->
+        val r = android.graphics.Rect()
+        node.getBoundsInScreen(r)
+        if (r.isEmpty()) null else r
+      }
+
       val focusedEditRect = android.graphics.Rect()
       val focusedEdit = editNodes.firstOrNull { it.isFocused } ?: editNodes.maxByOrNull { node ->
         val r = android.graphics.Rect()
@@ -792,15 +798,17 @@ override fun onServiceConnected() {
       }
       focusedEdit?.getBoundsInScreen(focusedEditRect)
 
+      val unsafeEditTop = editRects.minOfOrNull { it.top }
       val fallbackTapY = rect.top + (rect.height() * 0.28f)
-      val editBasedTapY = if (!focusedEditRect.isEmpty()) {
-        focusedEditRect.top - 120f
+      val editBasedTapY = if (unsafeEditTop != null) {
+        maxOf(fallbackTapY, unsafeEditTop - 420f)
       } else {
         fallbackTapY
       }
 
       val minTapY = rect.top + 80f
-      val maxTapY = rect.bottom - 220f
+      val inputSafeMaxY = if (unsafeEditTop != null) unsafeEditTop - 24f else rect.bottom - 220f
+      val maxTapY = maxOf(minTapY, minOf(rect.bottom - 220f, inputSafeMaxY))
       val tapX = rect.left + (rect.width() * 0.50f)
       val tapY = editBasedTapY.coerceIn(minTapY, maxTapY)
 
@@ -816,7 +824,7 @@ override fun onServiceConnected() {
 
       appendDebugLog(
         "GPT→TG",
-        "TELEGRAM_KEYBOARD_SAFE_TAP_AFTER_SEND source=$source dispatched=$dispatched tapX=${tapX.toInt()} tapY=${tapY.toInt()} rootBounds=${rect.left},${rect.top},${rect.right},${rect.bottom} editBounds=${focusedEditRect.left},${focusedEditRect.top},${focusedEditRect.right},${focusedEditRect.bottom} editNodes=${editNodes.size}"
+        "TELEGRAM_KEYBOARD_SAFE_TAP_AFTER_SEND source=$source dispatched=$dispatched tapX=${tapX.toInt()} tapY=${tapY.toInt()} rootBounds=${rect.left},${rect.top},${rect.right},${rect.bottom} editBounds=${focusedEditRect.left},${focusedEditRect.top},${focusedEditRect.right},${focusedEditRect.bottom} editNodes=${editNodes.size} unsafeEditTop=$unsafeEditTop maxTapY=${maxTapY.toInt()}"
       )
     }, 350L)
   }
