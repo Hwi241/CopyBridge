@@ -695,9 +695,69 @@ override fun onServiceConnected() {
     }, 450L)
   }
 
+  private fun clearTelegramInputFocusAfterSend(source: String): Boolean {
+    val roots = getTelegramRoots()
+    if (roots.isEmpty()) {
+      appendDebugLog(
+        "GPT→TG",
+        "TELEGRAM_INPUT_CLEAR_FOCUS_SKIPPED source=$source reason=noTelegramRoot"
+      )
+      return false
+    }
+
+    val editNodes = mutableListOf<AccessibilityNodeInfo>()
+    roots.forEach { root ->
+      collectTelegramEditTextNodes(root, editNodes)
+    }
+
+    val focusedNode = editNodes.firstOrNull { it.isFocused }
+    val targetNode = focusedNode ?: editNodes.maxByOrNull { node ->
+      val rect = android.graphics.Rect()
+      node.getBoundsInScreen(rect)
+      rect.bottom
+    }
+
+    if (targetNode == null) {
+      appendDebugLog(
+        "GPT→TG",
+        "TELEGRAM_INPUT_CLEAR_FOCUS_SKIPPED source=$source reason=noEditText editNodes=0 roots=${roots.size}"
+      )
+      return false
+    }
+
+    val rect = android.graphics.Rect()
+    targetNode.getBoundsInScreen(rect)
+    val result = targetNode.performAction(AccessibilityNodeInfo.ACTION_CLEAR_FOCUS)
+
+    appendDebugLog(
+      "GPT→TG",
+      "TELEGRAM_INPUT_CLEAR_FOCUS_AFTER_SEND source=$source result=$result focused=${targetNode.isFocused} editNodes=${editNodes.size} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+    )
+
+    return result
+  }
+
+  private fun collectTelegramEditTextNodes(
+    node: AccessibilityNodeInfo?,
+    out: MutableList<AccessibilityNodeInfo>
+  ) {
+    if (node == null) return
+
+    val className = node.className?.toString().orEmpty()
+    if (className.contains("EditText", ignoreCase = true)) {
+      out.add(node)
+    }
+
+    for (index in 0 until node.childCount) {
+      collectTelegramEditTextNodes(node.getChild(index), out)
+    }
+  }
+
   private fun hideTelegramKeyboardBySafeChatTapAfterSend(
     source: String
   ) {
+    clearTelegramInputFocusAfterSend(source)
+
     Handler(Looper.getMainLooper()).postDelayed({
       val telegramRoots = getTelegramRoots()
       val root = telegramRoots.firstOrNull()
@@ -721,8 +781,28 @@ override fun onServiceConnected() {
         return@postDelayed
       }
 
+      val editNodes = mutableListOf<AccessibilityNodeInfo>()
+      collectTelegramEditTextNodes(root, editNodes)
+
+      val focusedEditRect = android.graphics.Rect()
+      val focusedEdit = editNodes.firstOrNull { it.isFocused } ?: editNodes.maxByOrNull { node ->
+        val r = android.graphics.Rect()
+        node.getBoundsInScreen(r)
+        r.bottom
+      }
+      focusedEdit?.getBoundsInScreen(focusedEditRect)
+
+      val fallbackTapY = rect.top + (rect.height() * 0.28f)
+      val editBasedTapY = if (!focusedEditRect.isEmpty()) {
+        focusedEditRect.top - 120f
+      } else {
+        fallbackTapY
+      }
+
+      val minTapY = rect.top + 80f
+      val maxTapY = rect.bottom - 220f
       val tapX = rect.left + (rect.width() * 0.50f)
-      val tapY = rect.top + (rect.height() * 0.42f)
+      val tapY = editBasedTapY.coerceIn(minTapY, maxTapY)
 
       val path = android.graphics.Path().apply {
         moveTo(tapX, tapY)
@@ -736,7 +816,7 @@ override fun onServiceConnected() {
 
       appendDebugLog(
         "GPT→TG",
-        "TELEGRAM_KEYBOARD_SAFE_TAP_AFTER_SEND source=$source dispatched=$dispatched tapX=${tapX.toInt()} tapY=${tapY.toInt()} rootBounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+        "TELEGRAM_KEYBOARD_SAFE_TAP_AFTER_SEND source=$source dispatched=$dispatched tapX=${tapX.toInt()} tapY=${tapY.toInt()} rootBounds=${rect.left},${rect.top},${rect.right},${rect.bottom} editBounds=${focusedEditRect.left},${focusedEditRect.top},${focusedEditRect.right},${focusedEditRect.bottom} editNodes=${editNodes.size}"
       )
     }, 350L)
   }
