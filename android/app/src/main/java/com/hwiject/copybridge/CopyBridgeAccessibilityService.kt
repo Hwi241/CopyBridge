@@ -878,6 +878,28 @@ override fun onServiceConnected() {
       return false
     }
 
+    val rootRect = android.graphics.Rect()
+    roots.firstOrNull()?.getBoundsInScreen(rootRect)
+    val allowBackForKeyboardClose = shouldAllowTelegramKeyboardBackAfterSend(rootRect)
+
+    if (!allowBackForKeyboardClose) {
+      val rootRelativeTapResult = tapTelegramRootRelativeKeyboardDismissSequenceAfterSend(
+        source = source,
+        rootRect = rootRect
+      )
+      val hideButtonResult = if (!rootRelativeTapResult) {
+        tapKeyboardHideButtonAfterSend(source)
+      } else {
+        false
+      }
+
+      appendDebugLog(
+        "GPT→TG",
+        "TELEGRAM_KEYBOARD_BACK_AFTER_SEND_SKIPPED source=$source reason=layoutNotAllowed focused=${focusedNode != null} recentStubbornFocus=$recentStubbornFocus clearFocusAgeMs=$clearFocusAgeMs rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} rootRelativeTapResult=$rootRelativeTapResult keyboardHideButtonResult=$hideButtonResult"
+      )
+      return rootRelativeTapResult || hideButtonResult
+    }
+
     val targetNode = focusedNode ?: editNodes.maxByOrNull { node ->
       val rect = android.graphics.Rect()
       node.getBoundsInScreen(rect)
@@ -904,6 +926,165 @@ override fun onServiceConnected() {
 
     return result
   }
+
+  private fun shouldAllowTelegramKeyboardBackAfterSend(rootRect: android.graphics.Rect): Boolean {
+    if (rootRect.isEmpty()) return false
+
+    val width = rootRect.width().coerceAtLeast(1)
+    val height = rootRect.height()
+
+    val startsNearTop = rootRect.top <= 120
+    val tallSidePane = height >= (width * 1.8f).toInt()
+
+    return startsNearTop && tallSidePane
+  }
+
+
+
+  private fun tapKeyboardHideButtonAfterSend(source: String): Boolean {
+    val candidates = mutableListOf<AccessibilityNodeInfo>()
+
+    windows.forEach { window ->
+      val root = window.root ?: return@forEach
+      collectKeyboardHideButtonCandidates(root, candidates)
+    }
+
+    val target = candidates.firstOrNull()
+    if (target == null) {
+      val windowSummary = windows.mapNotNull { window ->
+        val root = window.root ?: return@mapNotNull null
+        val rect = android.graphics.Rect()
+        root.getBoundsInScreen(rect)
+        val packageName = root.packageName?.toString().orEmpty()
+        val className = root.className?.toString().orEmpty()
+        "$packageName/$className/${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      }.take(8).joinToString("|")
+
+      appendDebugLog(
+        "GPT→TG",
+        "TELEGRAM_KEYBOARD_HIDE_BUTTON_AFTER_SEND_SKIPPED source=$source reason=noCandidate windows=$windowSummary"
+      )
+      return false
+    }
+
+    val rect = android.graphics.Rect()
+    target.getBoundsInScreen(rect)
+    val centerX = rect.centerX().toFloat()
+    val centerY = rect.centerY().toFloat()
+
+    val path = android.graphics.Path().apply {
+      moveTo(centerX, centerY)
+    }
+
+    val gesture = android.accessibilityservice.GestureDescription.Builder()
+      .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0L, 70L))
+      .build()
+
+    val dispatched = dispatchGesture(gesture, null, null)
+
+    appendDebugLog(
+      "GPT→TG",
+      "TELEGRAM_KEYBOARD_HIDE_BUTTON_AFTER_SEND source=$source dispatched=$dispatched label=${buildNodeLabel(target)} class=${target.className} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+    )
+
+    return dispatched
+  }
+
+  private fun collectKeyboardHideButtonCandidates(
+    node: AccessibilityNodeInfo?,
+    out: MutableList<AccessibilityNodeInfo>
+  ) {
+    if (node == null) return
+
+    val label = buildNodeLabel(node)
+
+    val looksLikeKeyboardHide =
+      label.contains("키보드 숨기기", ignoreCase = true) ||
+      label.contains("키보드 닫기", ignoreCase = true) ||
+      label.contains("키보드 내리기", ignoreCase = true) ||
+      label.contains("Hide keyboard", ignoreCase = true) ||
+      label.contains("Close keyboard", ignoreCase = true) ||
+      label.contains("Dismiss keyboard", ignoreCase = true)
+
+    if (looksLikeKeyboardHide) {
+      out.add(node)
+    }
+
+    for (index in 0 until node.childCount) {
+      collectKeyboardHideButtonCandidates(node.getChild(index), out)
+    }
+  }
+
+  private fun tapTelegramRootRelativeKeyboardDismissSequenceAfterSend(
+    source: String,
+    rootRect: android.graphics.Rect
+  ): Boolean {
+    val ratios = listOf(0.45f, 0.60f, 0.70f)
+    var firstDispatchResult = false
+
+    ratios.forEachIndexed { index, ratio ->
+      val delayMs = index * 180L
+
+      if (index == 0) {
+        firstDispatchResult = tapTelegramRootRelativeKeyboardDismissAfterSend(
+          source = "${source}_seq${index + 1}",
+          rootRect = rootRect,
+          yRatio = ratio
+        )
+      } else {
+        Handler(Looper.getMainLooper()).postDelayed({
+          tapTelegramRootRelativeKeyboardDismissAfterSend(
+            source = "${source}_seq${index + 1}",
+            rootRect = rootRect,
+            yRatio = ratio
+          )
+        }, delayMs)
+      }
+    }
+
+    appendDebugLog(
+      "GPT→TG",
+      "TELEGRAM_ROOT_RELATIVE_KEYBOARD_TAP_SEQUENCE_AFTER_SEND source=$source firstDispatchResult=$firstDispatchResult ratios=0.45,0.60,0.70 rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
+    )
+
+    return firstDispatchResult
+  }
+
+  private fun tapTelegramRootRelativeKeyboardDismissAfterSend(
+    source: String,
+    rootRect: android.graphics.Rect,
+    yRatio: Float
+  ): Boolean {
+    if (rootRect.isEmpty()) {
+      appendDebugLog(
+        "GPT→TG",
+        "TELEGRAM_ROOT_RELATIVE_KEYBOARD_TAP_AFTER_SEND_SKIPPED source=$source reason=emptyRoot"
+      )
+      return false
+    }
+
+    val clampedRatio = yRatio.coerceIn(0.12f, 0.70f)
+    val tapX = rootRect.centerX().toFloat()
+    val tapY = (rootRect.top + (rootRect.height() * clampedRatio)).toFloat()
+
+    val path = android.graphics.Path().apply {
+      moveTo(tapX, tapY)
+    }
+
+    val gesture = android.accessibilityservice.GestureDescription.Builder()
+      .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0L, 70L))
+      .build()
+
+    val dispatched = dispatchGesture(gesture, null, null)
+
+    appendDebugLog(
+      "GPT→TG",
+      "TELEGRAM_ROOT_RELATIVE_KEYBOARD_TAP_AFTER_SEND source=$source dispatched=$dispatched ratio=$clampedRatio tapX=${tapX.toInt()} tapY=${tapY.toInt()} rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
+    )
+
+    return dispatched
+  }
+
   private fun getTelegramRoots(): List<AccessibilityNodeInfo> {
     val candidates = mutableListOf<AccessibilityNodeInfo>()
 
