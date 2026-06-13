@@ -26,6 +26,12 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   private var lastBridgeMonitorGptStopSeenAtMs: Long = 0L
   private val bridgeGptRecentStopHoldMs: Long = 10000L
   private val bridgeGptIdleCompleteTimeoutMs: Long = 6000L
+  private var bridgeGptInsufficientActionRowStreak = 0
+  private var bridgeLastGptInsufficientActionRowAtMs: Long = 0L
+  private var bridgeLastGptInsufficientKeyboardCleanupAtMs: Long = 0L
+  private val bridgeGptInsufficientKeyboardCleanupCooldownMs: Long = 7000L
+  private var bridgeLastGptBusyKeyboardCleanupAtMs: Long = 0L
+  private val bridgeGptBusyKeyboardCleanupCooldownMs: Long = 8000L
   private val bridgeStatusMonitorRunnable = object : Runnable {
     override fun run() {
       runBridgeMonitorStatusTick()
@@ -36,6 +42,69 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   }
 
   private var lastPackageName: String? = null
+  private var bridgeLastGptToTelegramStartWasTelegram = false
+  private var bridgeLastGptToTelegramStartAtMs: Long = 0L
+  private var bridgeLastTelegramStartSmallScreenBackUsedAtMs: Long = 0L
+  private val bridgeTelegramStartSmallScreenBackWindowMs: Long = 5500L
+
+
+  private fun rememberGptToTelegramStartFocus(source: String) {
+    val nowMs = System.currentTimeMillis()
+    val activePackage = try {
+      rootInActiveWindow?.packageName?.toString().orEmpty()
+    } catch (_: Exception) { "" }
+    val lastEventPackage = lastPackageName.orEmpty()
+    val telegramRoots = getTelegramRoots()
+    val editNodes = mutableListOf<AccessibilityNodeInfo>()
+    telegramRoots.forEach { root ->
+      collectTelegramEditTextNodes(root, editNodes)
+    }
+    val telegramEditFocused = editNodes.any { node ->
+      try { node.isFocused } catch (_: Exception) { false }
+    }
+    val startedFromTelegram =
+      isTelegramPackage(activePackage) ||
+      isTelegramPackage(lastEventPackage) ||
+      telegramEditFocused
+
+    bridgeLastGptToTelegramStartWasTelegram = startedFromTelegram
+    bridgeLastGptToTelegramStartAtMs = nowMs
+    bridgeLastTelegramStartSmallScreenBackUsedAtMs = 0L
+
+    appendDebugLog(
+      "GPT→TG",
+      "GPT_TO_TG_START_FOCUS source=$source activePackage=$activePackage lastEventPackage=$lastEventPackage telegramRoots=${telegramRoots.size} editNodes=${editNodes.size} telegramEditFocused=$telegramEditFocused startedFromTelegram=$startedFromTelegram"
+    )
+  }
+
+  private fun shouldAllowTelegramStartSmallScreenBackAfterSend(
+    source: String,
+    focused: Boolean,
+    recentStubbornFocus: Boolean,
+    rootRect: android.graphics.Rect
+  ): Boolean {
+    if (source != "firstSent") return false
+    if (shouldAllowTelegramKeyboardBackAfterSend(rootRect)) return false
+    if (!focused && !recentStubbornFocus) return false
+    if (!bridgeLastGptToTelegramStartWasTelegram) return false
+
+    val nowMs = System.currentTimeMillis()
+    val startAgeMs = if (bridgeLastGptToTelegramStartAtMs > 0L) {
+      nowMs - bridgeLastGptToTelegramStartAtMs
+    } else { -1L }
+    if (startAgeMs !in 0L..bridgeTelegramStartSmallScreenBackWindowMs) return false
+
+    val alreadyUsed = bridgeLastTelegramStartSmallScreenBackUsedAtMs >= bridgeLastGptToTelegramStartAtMs
+    if (alreadyUsed) return false
+
+    bridgeLastTelegramStartSmallScreenBackUsedAtMs = nowMs
+
+    appendDebugLog(
+      "GPT→TG",
+      "TELEGRAM_START_SMALL_SCREEN_BACK_ALLOWED source=$source startAgeMs=$startAgeMs focused=$focused recentStubbornFocus=$recentStubbornFocus rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
+    )
+    return true
+  }
 
     private fun startBridgeStatusMonitor() {
     if (bridgeStatusMonitorRunning) return
@@ -177,6 +246,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     }
 
     if (actionCandidates.isEmpty()) {
+      resetGptInsufficientActionRowForKeyboardCleanup("noActionCandidates")
+
       appendDebugLog(
         "GPT→TG",
         "GPT_ACTION_ROW_MATCH found=false candidates=0"
@@ -195,6 +266,12 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       ).size >= 3
 
     if (!hasEnoughActionRow) {
+      recordGptInsufficientActionRowForKeyboardCleanup(
+        candidates = actionCandidates.size,
+        bottomBand = bottomBand.size,
+        labels = uniqueLabels
+      )
+
       appendDebugLog(
         "GPT→TG",
         "GPT_ACTION_ROW_MATCH found=false reason=insufficientActionRow candidates=${actionCandidates.size} bottomBand=${bottomBand.size} labels=${uniqueLabels.joinToString("|")}"
@@ -207,6 +284,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
       return false
     }
+
+    resetGptInsufficientActionRowForKeyboardCleanup("enoughActionRow")
 
     val textCandidates = mutableListOf<Pair<String, android.graphics.Rect>>()
 
@@ -278,6 +357,92 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     }
 
     return found
+  }
+
+  private fun recordGptInsufficientActionRowForKeyboardCleanup(
+    candidates: Int,
+    bottomBand: Int,
+    labels: Set<String>
+  ) {
+    val nowMs = System.currentTimeMillis()
+    val recent = bridgeLastGptInsufficientActionRowAtMs > 0L &&
+      nowMs - bridgeLastGptInsufficientActionRowAtMs <= 2500L
+    bridgeGptInsufficientActionRowStreak = if (recent) {
+      bridgeGptInsufficientActionRowStreak + 1
+    } else { 1 }
+    bridgeLastGptInsufficientActionRowAtMs = nowMs
+    appendDebugLog("GPT→TG", "GPT_INSUFFICIENT_ACTION_ROW_STREAK streak=$bridgeGptInsufficientActionRowStreak candidates=$candidates bottomBand=$bottomBand labels=${labels.joinToString("|")}")
+  }
+
+  private fun resetGptInsufficientActionRowForKeyboardCleanup(reason: String) {
+    if (bridgeGptInsufficientActionRowStreak > 0) {
+      appendDebugLog("GPT→TG", "GPT_INSUFFICIENT_ACTION_ROW_STREAK_RESET reason=$reason previousStreak=$bridgeGptInsufficientActionRowStreak")
+    }
+    bridgeGptInsufficientActionRowStreak = 0
+  }
+
+  private fun maybeDismissTelegramKeyboardAfterRepeatedGptInsufficientActionRow(
+    nowMs: Long, telegramRoots: List<AccessibilityNodeInfo>
+  ) {
+    if (bridgeGptInsufficientActionRowStreak < 3) return
+    val cooldownAgeMs = if (bridgeLastGptInsufficientKeyboardCleanupAtMs > 0L) {
+      nowMs - bridgeLastGptInsufficientKeyboardCleanupAtMs
+    } else { Long.MAX_VALUE }
+    if (cooldownAgeMs in 0L until bridgeGptInsufficientKeyboardCleanupCooldownMs) return
+
+    val editNode = findEditableNodeFromRoots(telegramRoots)
+    val editRect = Rect()
+    try { editNode?.getBoundsInScreen(editRect) } catch (_: Exception) {}
+    val selectedRoot = pickTelegramKeyboardRootRectForEditBounds(telegramRoots, editRect)
+    val telegramRoot = selectedRoot.first
+    val rootRect = selectedRoot.second
+    val allRootBounds = describeTelegramRootRectsForLog(telegramRoots)
+    if (telegramRoot == null || rootRect.isEmpty()) {
+      appendDebugLog("GPT→TG", "GPT_INSUFFICIENT_ACTION_ROW_KEYBOARD_CLEANUP_SKIPPED reason=noTelegramRoot streak=$bridgeGptInsufficientActionRowStreak allRootBounds=$allRootBounds editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}")
+      return
+    }
+    val allowBack = shouldAllowTelegramKeyboardBackAfterSend(rootRect)
+    if (allowBack) {
+      appendDebugLog("GPT→TG", "GPT_INSUFFICIENT_ACTION_ROW_KEYBOARD_CLEANUP_SKIPPED reason=sidePaneUsesBack streak=$bridgeGptInsufficientActionRowStreak rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} selectedRootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} allRootBounds=$allRootBounds editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}")
+      return
+    }
+    bridgeLastGptInsufficientKeyboardCleanupAtMs = nowMs
+    val result = tapTelegramRootRelativeKeyboardDismissSequenceAfterSend(source = "gptInsufficientActionRow", rootRect = rootRect)
+    appendDebugLog("GPT→TG", "GPT_INSUFFICIENT_ACTION_ROW_KEYBOARD_CLEANUP streak=$bridgeGptInsufficientActionRowStreak result=$result cooldownAgeMs=$cooldownAgeMs rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} selectedRootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} allRootBounds=$allRootBounds editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}")
+  }
+
+  private fun maybeDismissTelegramKeyboardDuringGptBusy(
+    nowMs: Long, telegramRoots: List<AccessibilityNodeInfo>, gptBusyByStop: Boolean, telegramTyping: Boolean
+  ) {
+    if (!gptBusyByStop) return
+    if (telegramTyping) return
+    val cooldownAgeMs = if (bridgeLastGptBusyKeyboardCleanupAtMs > 0L) {
+      nowMs - bridgeLastGptBusyKeyboardCleanupAtMs
+    } else { Long.MAX_VALUE }
+    if (cooldownAgeMs in 0L until bridgeGptBusyKeyboardCleanupCooldownMs) return
+
+    val editNode = findEditableNodeFromRoots(telegramRoots)
+    val editRect = Rect()
+    try { editNode?.getBoundsInScreen(editRect) } catch (_: Exception) {}
+    val selectedRoot = pickTelegramKeyboardRootRectForEditBounds(telegramRoots, editRect)
+    val telegramRoot = selectedRoot.first
+    val rootRect = selectedRoot.second
+    val allRootBounds = describeTelegramRootRectsForLog(telegramRoots)
+    if (telegramRoot == null || rootRect.isEmpty()) {
+      bridgeLastGptBusyKeyboardCleanupAtMs = nowMs
+      appendDebugLog("GPT→TG", "GPT_BUSY_KEYBOARD_CLEANUP_SKIPPED reason=noTelegramRoot allRootBounds=$allRootBounds editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}")
+      return
+    }
+    val allowBack = shouldAllowTelegramKeyboardBackAfterSend(rootRect)
+    if (allowBack) {
+      bridgeLastGptBusyKeyboardCleanupAtMs = nowMs
+      appendDebugLog("GPT→TG", "GPT_BUSY_KEYBOARD_CLEANUP_SKIPPED reason=sidePaneUsesBack rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} selectedRootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} allRootBounds=$allRootBounds editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}")
+      return
+    }
+    val editFocused = try { editNode?.isFocused ?: false } catch (_: Exception) { false }
+    bridgeLastGptBusyKeyboardCleanupAtMs = nowMs
+    val result = tapTelegramRootRelativeKeyboardDismissSequenceAfterSend(source = "gptBusy", rootRect = rootRect)
+    appendDebugLog("GPT→TG", "GPT_BUSY_KEYBOARD_CLEANUP result=$result cooldownAgeMs=$cooldownAgeMs editFound=${editNode != null} editFocused=$editFocused rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} selectedRootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} allRootBounds=$allRootBounds editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}")
   }
 
   private fun collectGptCompletionActionNodesForDecision(
@@ -372,6 +537,20 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
       appendDebugLog("GPT→TG", "GPT_TEXT_CHANGE_SCAN candidates=latest changed=$gptTextChanged active=$gptBusyByTextChange ageMs=$gptTextChangeAgeMs")
       appendDebugLog("GPT→TG", "GPT_TEXT_CHANGE_GUARD changed=$gptTextChanged previousBusy=$previousGptBusy stop=$gptBusyByStop actionComplete=$gptCompletedByActionRow recentStop=$gptTextChangeRecentStopSeen active=$gptBusyByTextChange")
+
+      if (!gptCompletedByActionRow && !gptBusyByStop) {
+        maybeDismissTelegramKeyboardAfterRepeatedGptInsufficientActionRow(
+          nowMs = nowMs,
+          telegramRoots = tgRootsForMonitor
+        )
+      }
+
+      maybeDismissTelegramKeyboardDuringGptBusy(
+        nowMs = nowMs,
+        telegramRoots = tgRootsForMonitor,
+        gptBusyByStop = gptBusyByStop,
+        telegramTyping = telegramTyping
+      )
 
       if (gptBusyByStop || (gptTextChanged && !gptCompletedByActionRow && gptTextChangeRecentStopSeen)) {
         lastBridgeMonitorGptActivityAtMs = nowMs
@@ -878,14 +1057,30 @@ override fun onServiceConnected() {
       return false
     }
 
-    val rootRect = android.graphics.Rect()
-    roots.firstOrNull()?.getBoundsInScreen(rootRect)
-    val allowBackForKeyboardClose = shouldAllowTelegramKeyboardBackAfterSend(rootRect)
+    val focusedEditRect = android.graphics.Rect()
+    focusedNode?.getBoundsInScreen(focusedEditRect)
+    val selectedRoot = pickTelegramKeyboardRootRectForEditBounds(roots, focusedEditRect)
+    val selectedRootRect = selectedRoot.second
+    val allRootBounds = describeTelegramRootRectsForLog(roots)
 
-    if (!allowBackForKeyboardClose) {
+    val allowBackForKeyboardClose = shouldAllowTelegramKeyboardBackAfterSend(selectedRootRect)
+    val allowTelegramStartSmallScreenBack = shouldAllowTelegramStartSmallScreenBackAfterSend(
+      source = source,
+      focused = focusedNode != null,
+      recentStubbornFocus = recentStubbornFocus,
+      rootRect = selectedRootRect
+    ) ||
+      shouldAllowTelegramStartSmallScreenBackAfterSend(
+        source = source,
+        focused = focusedNode != null,
+        recentStubbornFocus = recentStubbornFocus,
+        rootRect = selectedRootRect
+      )
+
+    if (!allowBackForKeyboardClose && !allowTelegramStartSmallScreenBack) {
       val rootRelativeTapResult = tapTelegramRootRelativeKeyboardDismissSequenceAfterSend(
         source = source,
-        rootRect = rootRect
+        rootRect = selectedRootRect
       )
       val hideButtonResult = if (!rootRelativeTapResult) {
         tapKeyboardHideButtonAfterSend(source)
@@ -895,7 +1090,7 @@ override fun onServiceConnected() {
 
       appendDebugLog(
         "GPT→TG",
-        "TELEGRAM_KEYBOARD_BACK_AFTER_SEND_SKIPPED source=$source reason=layoutNotAllowed focused=${focusedNode != null} recentStubbornFocus=$recentStubbornFocus clearFocusAgeMs=$clearFocusAgeMs rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} rootRelativeTapResult=$rootRelativeTapResult keyboardHideButtonResult=$hideButtonResult"
+        "TELEGRAM_KEYBOARD_BACK_AFTER_SEND_SKIPPED source=$source reason=layoutNotAllowed focused=${focusedNode != null} recentStubbornFocus=$recentStubbornFocus clearFocusAgeMs=$clearFocusAgeMs rootBounds=${selectedRootRect.left},${selectedRootRect.top},${selectedRootRect.right},${selectedRootRect.bottom} selectedRootBounds=${selectedRootRect.left},${selectedRootRect.top},${selectedRootRect.right},${selectedRootRect.bottom} allRootBounds=$allRootBounds rootRelativeTapResult=$rootRelativeTapResult keyboardHideButtonResult=$hideButtonResult"
       )
       return rootRelativeTapResult || hideButtonResult
     }
@@ -917,11 +1112,22 @@ override fun onServiceConnected() {
     val rect = android.graphics.Rect()
     targetNode.getBoundsInScreen(rect)
 
-    val reason = if (focusedNode != null) "focusedEditText" else "recentStubbornFocus"
+    val reason = when {
+          allowTelegramStartSmallScreenBack -> "telegramStartSmallScreenBack"
+          focusedNode != null -> "focusedEditText"
+          else -> "recentStubbornFocus"
+        }
+    if (allowTelegramStartSmallScreenBack) {
+      appendDebugLog(
+        "GPT→TG",
+        "TELEGRAM_START_SMALL_SCREEN_BACK_EXECUTE source=$source rootBounds=${selectedRootRect.left},${selectedRootRect.top},${selectedRootRect.right},${selectedRootRect.bottom}"
+      )
+    }
+
     val result = performGlobalAction(GLOBAL_ACTION_BACK)
     appendDebugLog(
       "GPT→TG",
-      "TELEGRAM_KEYBOARD_BACK_AFTER_SEND source=$source result=$result reason=$reason editNodes=${editNodes.size} clearFocusAgeMs=$clearFocusAgeMs recentStubbornFocus=$recentStubbornFocus bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      "TELEGRAM_KEYBOARD_BACK_AFTER_SEND source=$source result=$result reason=$reason editNodes=${editNodes.size} clearFocusAgeMs=$clearFocusAgeMs recentStubbornFocus=$recentStubbornFocus bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} selectedRootBounds=${selectedRootRect.left},${selectedRootRect.top},${selectedRootRect.right},${selectedRootRect.bottom} allRootBounds=$allRootBounds"
     )
 
     return result
@@ -1015,6 +1221,85 @@ override fun onServiceConnected() {
     }
   }
 
+  private fun tapGptSafeAreaAfterTelegramKeyboardCleanup(
+    source: String,
+    telegramRootRect: android.graphics.Rect
+  ): Boolean {
+    val gptRoots = collectGptMonitorRoots()
+    val gptRootRects = gptRoots.mapNotNull { root ->
+      val rect = android.graphics.Rect()
+      try {
+        root.getBoundsInScreen(rect)
+      } catch (_: Exception) {
+        return@mapNotNull null
+      }
+      if (rect.isEmpty()) null else root to rect
+    }
+
+    val selected = gptRootRects.minWithOrNull(
+      compareBy<Pair<AccessibilityNodeInfo, android.graphics.Rect>> { it.second.width().toLong() * it.second.height().toLong() }
+        .thenBy { it.second.top }
+        .thenBy { it.second.left }
+    )
+
+    val fallbackFromTelegram = selected == null
+    val gptRect = selected?.second ?: android.graphics.Rect()
+
+    if (fallbackFromTelegram && telegramRootRect.isEmpty()) {
+      appendDebugLog(
+        "GPT→TG",
+        "GPT_SAFE_TAP_AFTER_TELEGRAM_KEYBOARD_CLEANUP_SKIPPED source=$source reason=noGptRootAndEmptyTelegramRoot gptRoots=${gptRoots.size} telegramRootBounds=${telegramRootRect.left},${telegramRootRect.top},${telegramRootRect.right},${telegramRootRect.bottom}"
+      )
+      return false
+    }
+
+    val tapX: Float
+    val rawTapY: Float
+    val minTapY: Float
+    val maxTapY: Float
+    val tapBasis: String
+
+    if (!fallbackFromTelegram) {
+      tapBasis = "gptRoot"
+      tapX = gptRect.left + (gptRect.width() * 0.50f)
+      rawTapY = gptRect.top + (gptRect.height() * 0.28f)
+      minTapY = gptRect.top + 80f
+      val telegramSafeMaxY = if (!telegramRootRect.isEmpty()) {
+        telegramRootRect.top - 120f
+      } else {
+        gptRect.bottom - 180f
+      }
+      val rootSafeMaxY = gptRect.bottom - 180f
+      maxTapY = maxOf(minTapY, minOf(telegramSafeMaxY, rootSafeMaxY))
+    } else {
+      tapBasis = "telegramTopFallback"
+      tapX = telegramRootRect.left + (telegramRootRect.width() * 0.50f)
+      rawTapY = telegramRootRect.top - 260f
+      minTapY = 80f
+      maxTapY = maxOf(minTapY, telegramRootRect.top - 120f)
+    }
+
+    val tapY = rawTapY.coerceIn(minTapY, maxTapY)
+
+    val path = android.graphics.Path().apply {
+      moveTo(tapX, tapY)
+    }
+
+    val gesture = android.accessibilityservice.GestureDescription.Builder()
+      .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0L, 70L))
+      .build()
+
+    val dispatched = dispatchGesture(gesture, null, null)
+
+    appendDebugLog(
+      "GPT→TG",
+      "GPT_SAFE_TAP_AFTER_TELEGRAM_KEYBOARD_CLEANUP source=$source dispatched=$dispatched tapBasis=$tapBasis fallbackFromTelegram=$fallbackFromTelegram tapX=${tapX.toInt()} tapY=${tapY.toInt()} rawTapY=${rawTapY.toInt()} minTapY=${minTapY.toInt()} maxTapY=${maxTapY.toInt()} gptRoots=${gptRoots.size} gptRootBounds=${gptRect.left},${gptRect.top},${gptRect.right},${gptRect.bottom} telegramRootBounds=${telegramRootRect.left},${telegramRootRect.top},${telegramRootRect.right},${telegramRootRect.bottom}"
+    )
+
+    return dispatched
+  }
+
+
   private fun tapTelegramRootRelativeKeyboardDismissSequenceAfterSend(
     source: String,
     rootRect: android.graphics.Rect
@@ -1023,7 +1308,7 @@ override fun onServiceConnected() {
     var firstDispatchResult = false
 
     ratios.forEachIndexed { index, ratio ->
-      val delayMs = index * 180L
+      val delayMs = index * 300L
 
       if (index == 0) {
         firstDispatchResult = tapTelegramRootRelativeKeyboardDismissAfterSend(
@@ -1044,8 +1329,28 @@ override fun onServiceConnected() {
 
     appendDebugLog(
       "GPT→TG",
-      "TELEGRAM_ROOT_RELATIVE_KEYBOARD_TAP_SEQUENCE_AFTER_SEND source=$source firstDispatchResult=$firstDispatchResult ratios=0.45,0.60,0.70 rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
+      "TELEGRAM_ROOT_RELATIVE_KEYBOARD_TAP_SEQUENCE_AFTER_SEND source=$source firstDispatchResult=$firstDispatchResult ratios=0.45,0.60,0.70 intervalMs=300 rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
     )
+
+    val allowBackForKeyboardClose = shouldAllowTelegramKeyboardBackAfterSend(rootRect)
+    if (!allowBackForKeyboardClose) {
+      Handler(Looper.getMainLooper()).postDelayed({
+        tapGptSafeAreaAfterTelegramKeyboardCleanup(
+          source = source,
+          telegramRootRect = rootRect
+        )
+      }, 1120L)
+
+      appendDebugLog(
+        "GPT→TG",
+        "GPT_SAFE_TAP_AFTER_TELEGRAM_KEYBOARD_CLEANUP_SCHEDULED source=$source delayMs=1120 rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
+      )
+    } else {
+      appendDebugLog(
+        "GPT→TG",
+        "GPT_SAFE_TAP_AFTER_TELEGRAM_KEYBOARD_CLEANUP_SKIPPED source=$source reason=sidePaneUsesBack rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
+      )
+    }
 
     return firstDispatchResult
   }
@@ -1064,11 +1369,66 @@ override fun onServiceConnected() {
     }
 
     val clampedRatio = yRatio.coerceIn(0.12f, 0.70f)
-    val tapX = rootRect.centerX().toFloat()
-    val tapY = (rootRect.top + (rootRect.height() * clampedRatio)).toFloat()
+    val rawTapX = rootRect.centerX().toFloat()
+    val rawTapY = (rootRect.top + (rootRect.height() * clampedRatio)).toFloat()
+
+    val allowBackForKeyboardClose = shouldAllowTelegramKeyboardBackAfterSend(rootRect)
+
+    var tapY = rawTapY
+    var editTopForCap = -1
+    var editNodesForCap = 0
+    var capApplied = false
+
+    if (!allowBackForKeyboardClose) {
+      val tgRoots = getTelegramRoots()
+      val editNodes = mutableListOf<AccessibilityNodeInfo>()
+
+      tgRoots.forEach { root ->
+        val candidateRootRect = android.graphics.Rect()
+        try { root.getBoundsInScreen(candidateRootRect) } catch (_: Exception) {}
+
+        val rootLooksRelated = !candidateRootRect.isEmpty() && (
+          candidateRootRect == rootRect ||
+          android.graphics.Rect.intersects(candidateRootRect, rootRect) ||
+          rootRect.contains(candidateRootRect.centerX(), candidateRootRect.centerY())
+        )
+
+        if (rootLooksRelated) {
+          collectTelegramEditTextNodes(root, editNodes)
+        }
+      }
+
+      val editRects = editNodes.mapNotNull { node ->
+        val rect = android.graphics.Rect()
+        try { node.getBoundsInScreen(rect) } catch (_: Exception) { return@mapNotNull null }
+        if (!rect.isEmpty() && android.graphics.Rect.intersects(rootRect, rect)) { rect } else { null }
+      }
+
+      editNodesForCap = editRects.size
+      val unsafeEditTop = editRects.minOfOrNull { it.top }
+      if (unsafeEditTop != null) {
+        editTopForCap = unsafeEditTop
+        val minTapY = rootRect.top + 80f
+        val rootBottomSafeY = rootRect.bottom - 80f
+        val editSafeMaxY = unsafeEditTop - 96f
+        val cappedMaxY = minOf(rootBottomSafeY, editSafeMaxY)
+
+        if (cappedMaxY > minTapY) {
+          val cappedTapY = minOf(rawTapY, cappedMaxY)
+          capApplied = cappedTapY != rawTapY
+          tapY = cappedTapY
+        } else {
+          tapY = minTapY
+          capApplied = tapY != rawTapY
+        }
+      }
+    }
+
+    val finalTapX = rawTapX
+    tapY = tapY.coerceIn(rootRect.top + 40f, rootRect.bottom - 40f)
 
     val path = android.graphics.Path().apply {
-      moveTo(tapX, tapY)
+      moveTo(finalTapX, tapY)
     }
 
     val gesture = android.accessibilityservice.GestureDescription.Builder()
@@ -1079,12 +1439,11 @@ override fun onServiceConnected() {
 
     appendDebugLog(
       "GPT→TG",
-      "TELEGRAM_ROOT_RELATIVE_KEYBOARD_TAP_AFTER_SEND source=$source dispatched=$dispatched ratio=$clampedRatio tapX=${tapX.toInt()} tapY=${tapY.toInt()} rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
+      "TELEGRAM_ROOT_RELATIVE_KEYBOARD_TAP_AFTER_SEND source=$source dispatched=$dispatched ratio=$clampedRatio tapX=${finalTapX.toInt()} tapY=${tapY.toInt()} rawTapY=${rawTapY.toInt()} capApplied=$capApplied editTopForCap=$editTopForCap editNodesForCap=$editNodesForCap allowBackForKeyboardClose=$allowBackForKeyboardClose rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
     )
 
     return dispatched
   }
-
   private fun getTelegramRoots(): List<AccessibilityNodeInfo> {
     val candidates = mutableListOf<AccessibilityNodeInfo>()
 
@@ -1123,6 +1482,63 @@ override fun onServiceConnected() {
     )
 
     return telegramRoots.isNotEmpty() && gptRoots.isNotEmpty()
+  }
+
+  private fun describeTelegramRootRectsForLog(roots: List<AccessibilityNodeInfo>): String {
+    return roots.mapIndexedNotNull { index, root ->
+      val rect = Rect()
+      try {
+        root.getBoundsInScreen(rect)
+        if (rect.isEmpty()) {
+          null
+        } else {
+          "#$index=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+        }
+      } catch (_: Exception) {
+        null
+      }
+    }.joinToString(";")
+  }
+
+  private fun pickTelegramKeyboardRootRectForEditBounds(
+    roots: List<AccessibilityNodeInfo>,
+    editRect: Rect
+  ): Pair<AccessibilityNodeInfo?, Rect> {
+    val rootRects = roots.mapNotNull { root ->
+      val rect = Rect()
+      try {
+        root.getBoundsInScreen(rect)
+      } catch (_: Exception) {
+        return@mapNotNull null
+      }
+      if (rect.isEmpty()) null else root to rect
+    }
+
+    if (rootRects.isEmpty()) {
+      return null to Rect()
+    }
+
+    val editCenterX = editRect.centerX()
+    val editCenterY = editRect.centerY()
+    val hasValidEditRect = !editRect.isEmpty() && editRect.bottom > editRect.top && editRect.right > editRect.left
+
+    val containing = if (hasValidEditRect) {
+      rootRects.filter { (_, rootRect) ->
+        rootRect.contains(editCenterX, editCenterY) ||
+        Rect.intersects(rootRect, editRect)
+      }
+    } else {
+      emptyList()
+    }
+
+    val selected = (if (containing.isNotEmpty()) containing else rootRects)
+      .minWithOrNull(
+        compareBy<Pair<AccessibilityNodeInfo, Rect>> { it.second.width().toLong() * it.second.height().toLong() }
+          .thenBy { it.second.top }
+          .thenBy { it.second.left }
+      )
+
+    return selected ?: (null to Rect())
   }
 
   private fun isTelegramPackage(packageName: String): Boolean {
@@ -2679,9 +3095,8 @@ override fun onServiceConnected() {
     appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE pasted=$pasted valid=$pasteValid autoSend=$autoSend")
     logTelegramEditSnapshot("COPY_BUTTON_PASTE_SNAPSHOT", tgEdit)
     if (!pasteValid && gptOutputMode == "CODE") {
-      val longPasteValid = tryTelegramLongClickPaste(tgEdit)
-      appendDebugLog("GPT→TG", "CODE_LONG_PASTE result=$longPasteValid")
-      if (longPasteValid) { pasted = true; pasteValid = true }
+      appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE_CODE_FAST_FALLBACK reason=invalidPaste skipLongPaste=true skipRetry=true")
+      return false
     }
 
     if (!pasteValid && gptOutputMode == "FULL") {
@@ -3486,6 +3901,7 @@ override fun onServiceConnected() {
       }
 
       service.appendDebugLog("GPT\u2192TG", "START mode=$gptOutputMode autoSend=$autoSend")
+      service.rememberGptToTelegramStartFocus("start")
       service.appendDebugLog("GPT\u2192TG", "STEP after START")
 
        val aiRoots = service.getAiRoots()
