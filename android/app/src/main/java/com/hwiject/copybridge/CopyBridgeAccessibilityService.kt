@@ -62,10 +62,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val telegramEditFocused = editNodes.any { node ->
       try { node.isFocused } catch (_: Exception) { false }
     }
-    val startedFromTelegram =
-      isTelegramPackage(activePackage) ||
-      isTelegramPackage(lastEventPackage) ||
-      telegramEditFocused
+    val startedFromTelegram = isTelegramPackage(activePackage)
+    val lastEventPackageWasTelegram = isTelegramPackage(lastEventPackage)
 
     bridgeLastGptToTelegramStartWasTelegram = startedFromTelegram
     bridgeLastGptToTelegramStartAtMs = nowMs
@@ -73,7 +71,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
     appendDebugLog(
       "GPT→TG",
-      "GPT_TO_TG_START_FOCUS source=$source activePackage=$activePackage lastEventPackage=$lastEventPackage telegramRoots=${telegramRoots.size} editNodes=${editNodes.size} telegramEditFocused=$telegramEditFocused startedFromTelegram=$startedFromTelegram"
+      "GPT_TO_TG_START_FOCUS source=$source decision=activePackageOnly activePackage=$activePackage lastEventPackage=$lastEventPackage lastEventPackageWasTelegram=$lastEventPackageWasTelegram telegramRoots=${telegramRoots.size} editNodes=${editNodes.size} telegramEditFocused=$telegramEditFocused startedFromTelegram=$startedFromTelegram"
     )
   }
 
