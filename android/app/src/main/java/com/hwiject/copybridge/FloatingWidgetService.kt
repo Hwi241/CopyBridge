@@ -1,18 +1,23 @@
 package com.hwiject.copybridge
 
 import android.app.Service
+import android.animation.AnimatorSet
+import android.animation.ObjectAnimator
+import android.animation.StateListAnimator
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.IBinder
 import android.provider.Settings
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -432,14 +437,13 @@ class FloatingWidgetService : Service() {
       textSize = size.buttonTextSize
       typeface = Typeface.DEFAULT_BOLD
       gravity = Gravity.CENTER
-      background = roundedBackground(Color.parseColor("#242424"), 12f)
+      background = pressedRoundedBackground(Color.parseColor("#242424"), Color.parseColor("#1C1C1C"), 12f)
+      elevation = BUTTON_REST_ELEVATION
+      applyPressStateAnimator(this)
       setPadding(8, 0, 8, 0)
-      setOnClickListener {
+      setOnClickListener { view ->
+        view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         autoSendEnabled = !autoSendEnabled; saveWidgetPreferences(); refreshWidgetAtSamePosition()
-      }
-      setOnTouchListener { view, event ->
-        applyPressFeedback(view, event)
-        false
       }
       minHeight = 0
       minimumHeight = 0
@@ -926,11 +930,12 @@ class FloatingWidgetService : Service() {
       gravity = Gravity.CENTER
       includeFontPadding = false
       setPadding(0, 0, 0, 2)
-      background = roundedBackground(Color.parseColor("#333333"), 12f)
-      setOnClickListener { onClick() }
-      setOnTouchListener { view, event ->
-        applyPressFeedback(view, event)
-        false
+      background = pressedRoundedBackground(Color.parseColor("#333333"), Color.parseColor("#292929"), 12f)
+      elevation = BUTTON_REST_ELEVATION
+      applyPressStateAnimator(this)
+      setOnClickListener { view ->
+        view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        onClick()
       }
     }
   }
@@ -984,12 +989,13 @@ class FloatingWidgetService : Service() {
       textSize = textSizeValue
       typeface = Typeface.DEFAULT_BOLD
       setTextColor(Color.WHITE)
-      background = roundedBackground(Color.parseColor("#333333"), 12f)
+      background = pressedRoundedBackground(Color.parseColor("#333333"), Color.parseColor("#292929"), 12f)
+      elevation = BUTTON_REST_ELEVATION
+      applyPressStateAnimator(this)
       setPadding(8, 0, 8, 0)
-      setOnClickListener { onClick() }
-      setOnTouchListener { view, event ->
-        applyPressFeedback(view, event)
-        false
+      setOnClickListener { view ->
+        view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        onClick()
       }
       minHeight = 0
       minimumHeight = 0
@@ -1008,12 +1014,13 @@ class FloatingWidgetService : Service() {
       textSize = textSizeValue
       typeface = Typeface.DEFAULT_BOLD
       setTextColor(Color.WHITE)
-      background = roundedBackground(Color.parseColor("#2AABEE"), 12f)
+      background = pressedRoundedBackground(Color.parseColor("#2AABEE"), Color.parseColor("#229AD7"), 12f)
+      elevation = BUTTON_REST_ELEVATION
+      applyPressStateAnimator(this)
       setPadding(8, 0, 8, 0)
-      setOnClickListener { onClick() }
-      setOnTouchListener { view, event ->
-        applyPressFeedback(view, event)
-        false
+      setOnClickListener { view ->
+        view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        onClick()
       }
       minHeight = 0
       minimumHeight = 0
@@ -1032,12 +1039,13 @@ class FloatingWidgetService : Service() {
       textSize = textSizeValue
       typeface = Typeface.DEFAULT_BOLD
       setTextColor(Color.parseColor("#171717"))
-      background = roundedBackground(Color.WHITE, 12f)
+      background = pressedRoundedBackground(Color.WHITE, Color.parseColor("#E8E8E8"), 12f)
+      elevation = BUTTON_REST_ELEVATION
+      applyPressStateAnimator(this)
       setPadding(8, 0, 8, 0)
-      setOnClickListener { onClick() }
-      setOnTouchListener { view, event ->
-        applyPressFeedback(view, event)
-        false
+      setOnClickListener { view ->
+        view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        onClick()
       }
       minHeight = 0
       minimumHeight = 0
@@ -1046,13 +1054,44 @@ class FloatingWidgetService : Service() {
     }
   }
 
-  private fun applyPressFeedback(view: View, event: MotionEvent) {
-    when (event.action) {
-      MotionEvent.ACTION_DOWN -> view.alpha = 0.55f
-      MotionEvent.ACTION_UP,
-      MotionEvent.ACTION_CANCEL -> view.alpha = 1f
+  private fun pressedRoundedBackground(
+    normalColor: Int,
+    pressedColor: Int,
+    radius: Float
+  ): StateListDrawable {
+    return StateListDrawable().apply {
+      addState(intArrayOf(android.R.attr.state_pressed), roundedBackground(pressedColor, radius))
+      addState(intArrayOf(), roundedBackground(normalColor, radius))
     }
   }
+
+  private fun applyPressStateAnimator(view: View) {
+    val pressedAnimator = AnimatorSet().apply {
+      playTogether(
+        ObjectAnimator.ofFloat(view, "scaleX", BUTTON_PRESSED_SCALE),
+        ObjectAnimator.ofFloat(view, "scaleY", BUTTON_PRESSED_SCALE),
+        ObjectAnimator.ofFloat(view, "alpha", BUTTON_PRESSED_ALPHA),
+        ObjectAnimator.ofFloat(view, "elevation", BUTTON_PRESSED_ELEVATION)
+      )
+      duration = BUTTON_PRESS_IN_DURATION_MS
+    }
+
+    val normalAnimator = AnimatorSet().apply {
+      playTogether(
+        ObjectAnimator.ofFloat(view, "scaleX", 1f),
+        ObjectAnimator.ofFloat(view, "scaleY", 1f),
+        ObjectAnimator.ofFloat(view, "alpha", 1f),
+        ObjectAnimator.ofFloat(view, "elevation", BUTTON_REST_ELEVATION)
+      )
+      duration = BUTTON_PRESS_OUT_DURATION_MS
+    }
+
+    view.stateListAnimator = StateListAnimator().apply {
+      addState(intArrayOf(android.R.attr.state_pressed), pressedAnimator)
+      addState(intArrayOf(), normalAnimator)
+    }
+  }
+
 
   private fun handleDrag(event: MotionEvent) {
     val params = layoutParams ?: return
@@ -1094,6 +1133,12 @@ class FloatingWidgetService : Service() {
     private const val KEY_WIDGET_Y = "widget_y"
     private const val COLLAPSED_TAP_SLOP = 96f
     private const val COLLAPSED_DRAG_SLOP = 18f
+    private const val BUTTON_PRESSED_SCALE = 0.96f
+    private const val BUTTON_PRESSED_ALPHA = 0.86f
+    private const val BUTTON_REST_ELEVATION = 6f
+    private const val BUTTON_PRESSED_ELEVATION = 2f
+    private const val BUTTON_PRESS_IN_DURATION_MS = 70L
+    private const val BUTTON_PRESS_OUT_DURATION_MS = 110L
     private const val API_BALANCE_REFRESH_INTERVAL_MS = 60_000L
     private const val API_BALANCE_RECENT_WINDOW_MS = 5 * 60_000L
     private const val API_BALANCE_HISTORY_WINDOW_MS = 10 * 60_000L
