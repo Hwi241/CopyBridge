@@ -1046,6 +1046,7 @@ override fun onServiceConnected() {
       lastTelegramClearFocusStillFocusedSource == source
 
     val focusedNode = editNodes.firstOrNull { it.isFocused }
+    val hasFocusedEditTextForBack = focusedNode != null
 
     if (focusedNode == null && !recentStubbornFocus) {
       appendDebugLog(
@@ -1061,16 +1062,36 @@ override fun onServiceConnected() {
     val selectedRootRect = selectedRoot.second
     val allRootBounds = describeTelegramRootRectsForLog(roots)
 
+    val keyboardLikelyVisibleByEditPosition = if (editNodes.isNotEmpty()) {
+      val lowestEdit = focusedNode ?: editNodes.maxByOrNull { n ->
+        val r = android.graphics.Rect()
+        n.getBoundsInScreen(r)
+        r.bottom
+      }
+      if (lowestEdit != null) {
+        val editBounds = android.graphics.Rect()
+        lowestEdit.getBoundsInScreen(editBounds)
+        val gapFromBottom = selectedRootRect.bottom - editBounds.bottom
+        val keyboardPlusInputArea = 500
+        editBounds.bottom > 0 && gapFromBottom >= keyboardPlusInputArea
+      } else {
+        false
+      }
+    } else {
+      false
+    }
+
+
     val allowBackForKeyboardClose = shouldAllowTelegramKeyboardBackAfterSend(selectedRootRect)
     val allowTelegramStartSmallScreenBack = shouldAllowTelegramStartSmallScreenBackAfterSend(
       source = source,
-      focused = focusedNode != null,
+      focused = hasFocusedEditTextForBack,
       recentStubbornFocus = recentStubbornFocus,
       rootRect = selectedRootRect
     ) ||
       shouldAllowTelegramStartSmallScreenBackAfterSend(
         source = source,
-        focused = focusedNode != null,
+        focused = hasFocusedEditTextForBack,
         recentStubbornFocus = recentStubbornFocus,
         rootRect = selectedRootRect
       )
@@ -1088,7 +1109,7 @@ override fun onServiceConnected() {
 
       appendDebugLog(
         "GPT→TG",
-        "TELEGRAM_KEYBOARD_BACK_AFTER_SEND_SKIPPED source=$source reason=layoutNotAllowed focused=${focusedNode != null} recentStubbornFocus=$recentStubbornFocus clearFocusAgeMs=$clearFocusAgeMs rootBounds=${selectedRootRect.left},${selectedRootRect.top},${selectedRootRect.right},${selectedRootRect.bottom} selectedRootBounds=${selectedRootRect.left},${selectedRootRect.top},${selectedRootRect.right},${selectedRootRect.bottom} allRootBounds=$allRootBounds rootRelativeTapResult=$rootRelativeTapResult keyboardHideButtonResult=$hideButtonResult"
+        "TELEGRAM_KEYBOARD_BACK_AFTER_SEND_SKIPPED source=$source reason=layoutNotAllowed focused=$hasFocusedEditTextForBack recentStubbornFocus=$recentStubbornFocus clearFocusAgeMs=$clearFocusAgeMs rootBounds=${selectedRootRect.left},${selectedRootRect.top},${selectedRootRect.right},${selectedRootRect.bottom} selectedRootBounds=${selectedRootRect.left},${selectedRootRect.top},${selectedRootRect.right},${selectedRootRect.bottom} allRootBounds=$allRootBounds rootRelativeTapResult=$rootRelativeTapResult keyboardHideButtonResult=$hideButtonResult"
       )
       return rootRelativeTapResult || hideButtonResult
     }
@@ -1112,9 +1133,19 @@ override fun onServiceConnected() {
 
     val reason = when {
           allowTelegramStartSmallScreenBack -> "telegramStartSmallScreenBack"
-          focusedNode != null -> "focusedEditText"
-          else -> "recentStubbornFocus"
+          hasFocusedEditTextForBack -> "focusedEditText"
+          keyboardLikelyVisibleByEditPosition -> "recentStubbornFocusKeyboardVisible"
+          else -> "unexpectedBackGuard"
         }
+    val shouldRunBackForKeyboardClose = hasFocusedEditTextForBack || allowTelegramStartSmallScreenBack || keyboardLikelyVisibleByEditPosition
+    if (!shouldRunBackForKeyboardClose) {
+        appendDebugLog(
+            "GPT→TG",
+            "TELEGRAM_KEYBOARD_BACK_AFTER_SEND_SKIPPED source=$source reason=recentStubbornFocusOnlyBackBlocked keyboardLikelyVisibleByEditPosition=$keyboardLikelyVisibleByEditPosition focused=$hasFocusedEditTextForBack recentStubbornFocus=$recentStubbornFocus allowBackForKeyboardClose=$allowBackForKeyboardClose allowTelegramStartSmallScreenBack=$allowTelegramStartSmallScreenBack clearFocusAgeMs=$clearFocusAgeMs rootBounds=${selectedRootRect.left},${selectedRootRect.top},${selectedRootRect.right},${selectedRootRect.bottom}"
+        )
+        return false
+    }
+
     if (allowTelegramStartSmallScreenBack) {
       appendDebugLog(
         "GPT→TG",
