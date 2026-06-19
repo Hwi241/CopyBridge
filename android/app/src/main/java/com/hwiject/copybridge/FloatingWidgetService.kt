@@ -51,6 +51,21 @@ class FloatingWidgetService : Service() {
   private var widgetOpacity = 1f
   private var collapsedOpacity = 0.85f
 
+  private var systemAutoCollapsed = false
+  private var bridgePairReadyStreak = 0
+  private var bridgePairMissingStreak = 0
+  private var lastBridgePairVisibleForAutoCollapse: Boolean? = null
+  private var bridgeVisibilityMonitorRunning = false
+  private val bridgeVisibilityHandler = Handler(Looper.getMainLooper())
+  private val bridgeVisibilityMonitorRunnable = object : Runnable {
+    override fun run() {
+      runBridgeVisibilityAutoCollapseTick()
+      if (bridgeVisibilityMonitorRunning) {
+        bridgeVisibilityHandler.postDelayed(this, BRIDGE_VISIBILITY_MONITOR_INTERVAL_MS)
+      }
+    }
+  }
+
   private val apiBalanceHandler = Handler(Looper.getMainLooper())
   private var apiBalanceTextView: TextView? = null
   private var apiBalanceBoxView: TextView? = null
@@ -116,6 +131,8 @@ class FloatingWidgetService : Service() {
   }
 
   override fun onDestroy() {
+    bridgeVisibilityMonitorRunning = false
+    bridgeVisibilityHandler.removeCallbacks(bridgeVisibilityMonitorRunnable)
     apiBalanceHandler.removeCallbacks(apiBalanceRunnable)
     removeFloatingWidget()
     super.onDestroy()
@@ -207,6 +224,7 @@ class FloatingWidgetService : Service() {
     try {
       windowManager?.addView(widgetView, params)
       Toast.makeText(this, "CopyBridge 위젯을 시작했습니다.", Toast.LENGTH_SHORT).show()
+      startBridgeVisibilityAutoCollapseMonitor()
       startDeepSeekBalanceAutoRefresh()
     } catch (_: Exception) {
       floatingView = null
@@ -393,7 +411,7 @@ class FloatingWidgetService : Service() {
     }
 
     val collapseButton = createHeaderButton("−") {
-      isCollapsed = true; saveWidgetPreferences(); refreshWidgetAtSamePosition()
+      systemAutoCollapsed = false; isCollapsed = true; saveWidgetPreferences(); refreshWidgetAtSamePosition()
     }
 
     val title = TextView(this).apply {
@@ -518,6 +536,7 @@ class FloatingWidgetService : Service() {
     }
 
     val collapseButton = createHeaderButton("−") {
+      systemAutoCollapsed = false
       isCollapsed = true
       saveWidgetPreferences()
       refreshWidgetAtSamePosition()
@@ -643,6 +662,7 @@ class FloatingWidgetService : Service() {
               dy <= COLLAPSED_DRAG_SLOP
 
             if (isTap) {
+              systemAutoCollapsed = false
               isCollapsed = false
               saveWidgetPreferences()
               refreshWidgetAtSamePosition()
@@ -662,6 +682,79 @@ class FloatingWidgetService : Service() {
     }
   }
 
+  private fun startBridgeVisibilityAutoCollapseMonitor() {
+    if (bridgeVisibilityMonitorRunning) return
+
+    bridgeVisibilityMonitorRunning = true
+    bridgePairMissingStreak = 0
+    bridgePairReadyStreak = 0
+    lastBridgePairVisibleForAutoCollapse = null
+
+    appendDebugLog(
+      "WIDGET",
+      "AUTO_COLLAPSE_MONITOR_START intervalMs=$BRIDGE_VISIBILITY_MONITOR_INTERVAL_MS"
+    )
+
+    bridgeVisibilityHandler.removeCallbacks(bridgeVisibilityMonitorRunnable)
+    bridgeVisibilityHandler.postDelayed(
+      bridgeVisibilityMonitorRunnable,
+      BRIDGE_VISIBILITY_MONITOR_INTERVAL_MS
+    )
+  }
+
+  private fun runBridgeVisibilityAutoCollapseTick() {
+    if (floatingView == null) return
+    val bothVisible = try {
+      CopyBridgeAccessibilityService.hasTelegramAndGptRootsForBridgeNow()
+    } catch (_: Exception) {
+      false
+    }
+
+    val previousVisible = lastBridgePairVisibleForAutoCollapse
+    lastBridgePairVisibleForAutoCollapse = bothVisible
+
+    if (bothVisible) {
+      bridgePairReadyStreak += 1
+      bridgePairMissingStreak = 0
+    } else {
+      bridgePairMissingStreak += 1
+      bridgePairReadyStreak = 0
+    }
+
+    if (previousVisible != bothVisible) {
+      appendDebugLog(
+        "WIDGET",
+        "AUTO_COLLAPSE_PAIR_VISIBILITY_CHANGE bothVisible=$bothVisible previous=$previousVisible isCollapsed=$isCollapsed systemAutoCollapsed=$systemAutoCollapsed missingStreak=$bridgePairMissingStreak readyStreak=$bridgePairReadyStreak"
+      )
+    }
+
+    if (!bothVisible && !isCollapsed && bridgePairMissingStreak >= BRIDGE_VISIBILITY_MISSING_STREAK_TO_COLLAPSE) {
+      systemAutoCollapsed = true
+      isCollapsed = true
+
+      appendDebugLog(
+        "WIDGET",
+        "AUTO_COLLAPSE_BY_PAIR_VISIBILITY action=collapse bothVisible=$bothVisible missingStreak=$bridgePairMissingStreak"
+      )
+
+      refreshWidgetAtSamePosition()
+      return
+    }
+
+    if (bothVisible && isCollapsed && systemAutoCollapsed && bridgePairReadyStreak >= BRIDGE_VISIBILITY_READY_STREAK_TO_RESTORE) {
+      systemAutoCollapsed = false
+      isCollapsed = false
+
+      appendDebugLog(
+        "WIDGET",
+        "AUTO_RESTORE_BY_PAIR_VISIBILITY action=restore bothVisible=$bothVisible readyStreak=$bridgePairReadyStreak"
+      )
+
+      refreshWidgetAtSamePosition()
+      return
+    }
+  }
+
   private fun refreshWidgetAtSamePosition() {
     val currentX = layoutParams?.x ?: 40
     val currentY = layoutParams?.y ?: 320
@@ -677,6 +770,7 @@ class FloatingWidgetService : Service() {
   }
 
   private fun restoreExpandedWidget() {
+    systemAutoCollapsed = false
     isCollapsed = false
     saveWidgetPreferences()
 
@@ -1139,6 +1233,9 @@ class FloatingWidgetService : Service() {
     private const val BUTTON_PRESSED_ELEVATION = 2f
     private const val BUTTON_PRESS_IN_DURATION_MS = 70L
     private const val BUTTON_PRESS_OUT_DURATION_MS = 110L
+    private const val BRIDGE_VISIBILITY_MONITOR_INTERVAL_MS = 1000L
+    private const val BRIDGE_VISIBILITY_MISSING_STREAK_TO_COLLAPSE = 2
+    private const val BRIDGE_VISIBILITY_READY_STREAK_TO_RESTORE = 1
     private const val API_BALANCE_REFRESH_INTERVAL_MS = 60_000L
     private const val API_BALANCE_RECENT_WINDOW_MS = 5 * 60_000L
     private const val API_BALANCE_HISTORY_WINDOW_MS = 10 * 60_000L
