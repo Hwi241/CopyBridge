@@ -13,7 +13,31 @@ import {
   View,
 } from 'react-native';
 
-const OPACITY_PRESETS = [1, 0.85, 0.7, 0.55];
+const OPACITY_MIN = 0.1;
+const OPACITY_MAX = 1;
+const OPACITY_STEP = 0.05;
+const OPACITY_MIN_PERCENT = 10;
+const OPACITY_MAX_PERCENT = 100;
+const clampOpacity = (value) => Math.min(OPACITY_MAX, Math.max(OPACITY_MIN, Number(value) || OPACITY_MIN));
+
+const snapOpacity = (value) => {
+  const clamped = clampOpacity(value);
+  const stepIndex = Math.round((clamped - OPACITY_MIN) / OPACITY_STEP);
+  return Number((OPACITY_MIN + stepIndex * OPACITY_STEP).toFixed(2));
+};
+
+const opacityToPercent = (value) => Math.round(snapOpacity(value) * 100);
+
+const opacityToRatio = (value) => {
+  const snapped = snapOpacity(value);
+  return Math.min(1, Math.max(0, (snapped - OPACITY_MIN) / (OPACITY_MAX - OPACITY_MIN)));
+};
+
+const opacityFromLocation = (locationX, width) => {
+  const safeWidth = Math.max(1, width || 1);
+  const ratio = Math.min(1, Math.max(0, locationX / safeWidth));
+  return snapOpacity(OPACITY_MIN + ratio * (OPACITY_MAX - OPACITY_MIN));
+};
 const API_USAGE_HOUR_MS = 60 * 60 * 1000;
 const API_USAGE_MINUTE_MS = 60 * 1000;
 const API_USAGE_ROWS_PER_HOUR = 60;
@@ -22,6 +46,8 @@ export default function App() {
   const [debugLogs, setDebugLogs] = useState('');
   const [widgetOpacity, setWidgetOpacity] = useState(1);
   const [collapsedOpacity, setCollapsedOpacity] = useState(0.85);
+  const [widgetOpacityTrackWidth, setWidgetOpacityTrackWidth] = useState(1);
+  const [collapsedOpacityTrackWidth, setCollapsedOpacityTrackWidth] = useState(1);
   const [deepSeekApiKey, setDeepSeekApiKey] = useState('');
   const [deepSeekKeyStatus, setDeepSeekKeyStatus] = useState('$KEY');
   const [deepSeekBalanceStatus, setDeepSeekBalanceStatus] = useState('$KEY');
@@ -162,18 +188,134 @@ export default function App() {
     }
   };
 
+  const previewWidgetOpacityValue = (value) => {
+    setWidgetOpacity(snapOpacity(value));
+  };
+
+  const previewCollapsedOpacityValue = (value) => {
+    setCollapsedOpacity(snapOpacity(value));
+  };
+
   const setWidgetOpacityValue = async (value) => {
+    const nextValue = snapOpacity(value);
+    setWidgetOpacity(nextValue);
+
     const nativeModule = getNativeModule();
     if (!nativeModule || typeof nativeModule.setWidgetOpacity !== 'function') return;
-    try { const next = await nativeModule.setWidgetOpacity(value); setWidgetOpacity(typeof next === 'number' ? next : value); }
-    catch (error) { Alert.alert('설정 실패', '위젯 투명도를 저장하지 못했습니다.'); }
+
+    try {
+      const savedValue = await nativeModule.setWidgetOpacity(nextValue);
+      setWidgetOpacity(typeof savedValue === 'number' ? snapOpacity(savedValue) : nextValue);
+    } catch (error) {
+      Alert.alert('설정 실패', '위젯 투명도를 저장하지 못했습니다.');
+    }
   };
 
   const setCollapsedOpacityValue = async (value) => {
+    const nextValue = snapOpacity(value);
+    setCollapsedOpacity(nextValue);
+
     const nativeModule = getNativeModule();
     if (!nativeModule || typeof nativeModule.setCollapsedOpacity !== 'function') return;
-    try { const next = await nativeModule.setCollapsedOpacity(value); setCollapsedOpacity(typeof next === 'number' ? next : value); }
-    catch (error) { Alert.alert('설정 실패', '최소화 아이콘 투명도를 저장하지 못했습니다.'); }
+
+    try {
+      const savedValue = await nativeModule.setCollapsedOpacity(nextValue);
+      setCollapsedOpacity(typeof savedValue === 'number' ? snapOpacity(savedValue) : nextValue);
+    } catch (error) {
+      Alert.alert('설정 실패', '최소화 아이콘 투명도를 저장하지 못했습니다.');
+    }
+  };
+
+  const renderOpacitySlider = ({
+    label,
+    value,
+    trackWidth,
+    setTrackWidth,
+    onPreview,
+    onCommit,
+  }) => {
+    const percent = opacityToPercent(value);
+    const ratio = opacityToRatio(value);
+    const progressPercent = ratio * 100;
+
+    let dragValue = snapOpacity(value);
+
+    const valueFromEvent = (event) => opacityFromLocation(
+      event.nativeEvent.locationX,
+      trackWidth
+    );
+
+    const previewFromEvent = (event) => {
+      dragValue = valueFromEvent(event);
+      onPreview(dragValue);
+    };
+
+    const commitFromEvent = (event) => {
+      dragValue = valueFromEvent(event);
+      onCommit(dragValue);
+    };
+
+    const decreaseOpacity = () => {
+      onCommit(snapOpacity(value - OPACITY_STEP));
+    };
+
+    const increaseOpacity = () => {
+      onCommit(snapOpacity(value + OPACITY_STEP));
+    };
+
+    return (
+      <View style={styles.opacitySliderBlock}>
+        <View style={styles.opacitySliderHeader}>
+          <Text style={styles.opacitySliderLabel}>{label}</Text>
+          <Text style={styles.opacitySliderValue}>{percent}%</Text>
+        </View>
+
+        <View style={styles.opacitySliderControlRow}>
+          <TouchableOpacity
+            style={styles.opacityArrowButton}
+            activeOpacity={0.82}
+            onPress={decreaseOpacity}
+          >
+            <Text style={styles.opacityArrowButtonText}>‹</Text>
+          </TouchableOpacity>
+
+          <View
+            style={styles.opacitySliderTrack}
+            onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width)}
+            onStartShouldSetResponder={() => true}
+            onMoveShouldSetResponder={() => true}
+            onResponderGrant={previewFromEvent}
+            onResponderMove={previewFromEvent}
+            onResponderRelease={commitFromEvent}
+            onResponderTerminate={() => onCommit(dragValue)}
+            onResponderTerminationRequest={() => false}
+          >
+            <View
+              pointerEvents="none"
+              style={[styles.opacitySliderFill, { width: `${progressPercent}%` }]}
+            />
+            <View
+              pointerEvents="none"
+              style={[styles.opacitySliderThumb, { left: `${progressPercent}%` }]}
+            />
+          </View>
+
+          <TouchableOpacity
+            style={styles.opacityArrowButton}
+            activeOpacity={0.82}
+            onPress={increaseOpacity}
+          >
+            <Text style={styles.opacityArrowButtonText}>›</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.opacitySliderRangeRow}>
+          <Text style={styles.opacitySliderRangeText}>{OPACITY_MIN_PERCENT}%</Text>
+          <Text style={styles.opacitySliderRangeText}>5% 단위</Text>
+          <Text style={styles.opacitySliderRangeText}>{OPACITY_MAX_PERCENT}%</Text>
+        </View>
+      </View>
+    );
   };
 
   const copyDebugLogs = async () => {
@@ -506,25 +648,27 @@ export default function App() {
 
         <View style={styles.opacityCard}>
             <Text style={styles.sectionTitle}>위젯 투명도</Text>
-            <Text style={styles.opacityDescription}>펼쳐진 위젯과 최소화 B 아이콘의 투명도를 따로 조절합니다.</Text>
+            <Text style={styles.opacityDescription}>
+              펼쳐진 위젯과 최소화 B 아이콘의 투명도를 10%~100% 범위에서 5% 단위로 조절합니다.
+            </Text>
 
-            <Text style={styles.opacityLabel}>전체 위젯 투명도</Text>
-            <View style={styles.opacityOptions}>
-              {OPACITY_PRESETS.map((value) => (
-                <TouchableOpacity key={`wo-${value}`} style={[styles.opacityOption, Math.abs(widgetOpacity - value) < 0.01 && styles.opacityOptionActive]} activeOpacity={0.8} onPress={() => setWidgetOpacityValue(value)}>
-                  <Text style={[styles.opacityOptionText, Math.abs(widgetOpacity - value) < 0.01 && styles.opacityOptionTextActive]}>{Math.round(value * 100)}%</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+            {renderOpacitySlider({
+              label: '전체 위젯 투명도',
+              value: widgetOpacity,
+              trackWidth: widgetOpacityTrackWidth,
+              setTrackWidth: setWidgetOpacityTrackWidth,
+              onPreview: previewWidgetOpacityValue,
+              onCommit: setWidgetOpacityValue,
+            })}
 
-            <Text style={styles.opacityLabel}>최소화 아이콘 투명도</Text>
-            <View style={styles.opacityOptions}>
-              {OPACITY_PRESETS.map((value) => (
-                <TouchableOpacity key={`co-${value}`} style={[styles.opacityOption, Math.abs(collapsedOpacity - value) < 0.01 && styles.opacityOptionActive]} activeOpacity={0.8} onPress={() => setCollapsedOpacityValue(value)}>
-                  <Text style={[styles.opacityOptionText, Math.abs(collapsedOpacity - value) < 0.01 && styles.opacityOptionTextActive]}>{Math.round(value * 100)}%</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+            {renderOpacitySlider({
+              label: '최소화 아이콘 투명도',
+              value: collapsedOpacity,
+              trackWidth: collapsedOpacityTrackWidth,
+              setTrackWidth: setCollapsedOpacityTrackWidth,
+              onPreview: previewCollapsedOpacityValue,
+              onCommit: setCollapsedOpacityValue,
+            })}
           </View>
 
           <View style={styles.logCard}>
@@ -981,6 +1125,88 @@ const styles = StyleSheet.create({
   },
   opacityOptionTextActive: {
     color: '#FFFFFF',
+  },
+  opacitySliderBlock: {
+    marginTop: 10,
+    marginBottom: 16,
+  },
+  opacitySliderHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  opacitySliderLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#2A2723',
+  },
+  opacitySliderValue: {
+    minWidth: 52,
+    textAlign: 'right',
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#171717',
+  },
+  opacitySliderControlRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  opacityArrowButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#171717',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  opacityArrowButtonText: {
+    color: '#FFFFFF',
+    fontSize: 28,
+    fontWeight: '800',
+    lineHeight: 30,
+  },
+  opacitySliderTrack: {
+    flex: 1,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#ECE6DD',
+    justifyContent: 'center',
+    position: 'relative',
+    overflow: 'visible',
+  },
+  opacitySliderFill: {
+    position: 'absolute',
+    left: 0,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#171717',
+  },
+  opacitySliderThumb: {
+    position: 'absolute',
+    width: 24,
+    height: 24,
+    marginLeft: -12,
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 3,
+    borderColor: '#171717',
+    shadowColor: '#000000',
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 3,
+  },
+  opacitySliderRangeRow: {
+    marginTop: 7,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  opacitySliderRangeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#8B8176',
   },
   logCard: {
     backgroundColor: '#FFFFFF',

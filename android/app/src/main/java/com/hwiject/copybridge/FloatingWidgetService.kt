@@ -149,8 +149,8 @@ class FloatingWidgetService : Service() {
       prefs.edit().putString(KEY_GPT_OUTPUT_MODE, "CODE").apply()
     }
     isCollapsed = prefs.getBoolean(KEY_WIDGET_COLLAPSED, false)
-    widgetOpacity = prefs.getFloat("widget_opacity", 1f)
-    collapsedOpacity = prefs.getFloat("collapsed_opacity", 0.85f)
+    widgetOpacity = clampWidgetOpacity(prefs.getFloat(KEY_WIDGET_OPACITY, OPACITY_DEFAULT_WIDGET))
+    collapsedOpacity = clampWidgetOpacity(prefs.getFloat(KEY_COLLAPSED_OPACITY, OPACITY_DEFAULT_COLLAPSED))
   }
 
   private fun saveWidgetPreferences() {
@@ -161,6 +161,8 @@ class FloatingWidgetService : Service() {
       .putString(KEY_REPLY_COPY_MODE, replyCopyModeString)
       .putString(KEY_GPT_OUTPUT_MODE, "CODE")
       .putBoolean(KEY_WIDGET_COLLAPSED, isCollapsed)
+      .putFloat(KEY_WIDGET_OPACITY, clampWidgetOpacity(widgetOpacity))
+      .putFloat(KEY_COLLAPSED_OPACITY, clampWidgetOpacity(collapsedOpacity))
       .apply()
   }
 
@@ -190,8 +192,8 @@ class FloatingWidgetService : Service() {
 
   private fun showFloatingWidget() {
     val prefs = getSharedPreferences("copybridge_floating_widget", MODE_PRIVATE)
-    widgetOpacity = prefs.getFloat("widget_opacity", 1f).coerceIn(0.35f, 1.0f)
-    collapsedOpacity = prefs.getFloat("collapsed_opacity", 0.85f).coerceIn(0.35f, 1.0f)
+    widgetOpacity = clampWidgetOpacity(prefs.getFloat(KEY_WIDGET_OPACITY, OPACITY_DEFAULT_WIDGET))
+    collapsedOpacity = clampWidgetOpacity(prefs.getFloat(KEY_COLLAPSED_OPACITY, OPACITY_DEFAULT_COLLAPSED))
     if (floatingView != null) {
       Toast.makeText(this, "CopyBridge 위젯이 이미 실행 중입니다.", Toast.LENGTH_SHORT).show()
       return
@@ -608,9 +610,18 @@ class FloatingWidgetService : Service() {
     prefs.edit().putString("logs", trimmed).apply()
   }
 
+  private fun clampWidgetOpacity(value: Float): Float {
+    return value.coerceIn(OPACITY_MIN_VALUE, OPACITY_MAX_VALUE)
+  }
+
+  private fun collapsedPressedAlpha(): Float {
+    return (clampWidgetOpacity(collapsedOpacity) * COLLAPSED_PRESSED_ALPHA_MULTIPLIER)
+      .coerceIn(OPACITY_MIN_VALUE, OPACITY_MAX_VALUE)
+  }
+
   private fun createCollapsedView(): View {
     return TextView(this).apply {
-      alpha = collapsedOpacity
+      alpha = clampWidgetOpacity(collapsedOpacity)
       text = "B"
       setTextColor(Color.WHITE)
       textSize = 20f
@@ -625,7 +636,7 @@ class FloatingWidgetService : Service() {
 
         when (event.action) {
           MotionEvent.ACTION_DOWN -> {
-            view.alpha = 0.55f
+            view.alpha = collapsedPressedAlpha()
             initialX = params.x
             initialY = params.y
             initialTouchX = event.rawX
@@ -652,7 +663,7 @@ class FloatingWidgetService : Service() {
           }
 
           MotionEvent.ACTION_UP -> {
-            view.alpha = 1f
+            view.alpha = clampWidgetOpacity(collapsedOpacity)
 
             val dx = event.rawX - initialTouchX
             val dy = event.rawY - initialTouchY
@@ -672,7 +683,7 @@ class FloatingWidgetService : Service() {
           }
 
           MotionEvent.ACTION_CANCEL -> {
-            view.alpha = 1f
+            view.alpha = clampWidgetOpacity(collapsedOpacity)
             true
           }
 
@@ -1221,12 +1232,19 @@ class FloatingWidgetService : Service() {
     private const val KEY_REPLY_COPY_MODE = "reply_copy_mode"
     private const val KEY_GPT_OUTPUT_MODE = "gpt_output_mode"
     private const val KEY_WIDGET_COLLAPSED = "widget_collapsed"
+    private const val KEY_WIDGET_OPACITY = "widget_opacity"
+    private const val KEY_COLLAPSED_OPACITY = "collapsed_opacity"
     const val ACTION_RESTORE_WIDGET = "com.hwiject.copybridge.RESTORE_WIDGET"
     const val ACTION_REFRESH_WIDGET = "com.hwiject.copybridge.REFRESH_WIDGET"
     private const val KEY_WIDGET_X = "widget_x"
     private const val KEY_WIDGET_Y = "widget_y"
     private const val COLLAPSED_TAP_SLOP = 96f
     private const val COLLAPSED_DRAG_SLOP = 18f
+    private const val OPACITY_MIN_VALUE = 0.10f
+    private const val OPACITY_MAX_VALUE = 1.0f
+    private const val OPACITY_DEFAULT_WIDGET = 1.0f
+    private const val OPACITY_DEFAULT_COLLAPSED = 0.85f
+    private const val COLLAPSED_PRESSED_ALPHA_MULTIPLIER = 0.65f
     private const val BUTTON_PRESSED_SCALE = 0.96f
     private const val BUTTON_PRESSED_ALPHA = 0.86f
     private const val BUTTON_REST_ELEVATION = 6f

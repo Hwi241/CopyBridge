@@ -15,6 +15,7 @@ import com.facebook.react.bridge.ReactMethod
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
+import kotlin.math.roundToInt
 import kotlin.concurrent.thread
 import org.json.JSONObject
 
@@ -24,6 +25,19 @@ class CopyBridgeNativeModule(
 
  override fun getName(): String {
  return "CopyBridgeNativeModule"
+ }
+
+ private fun sanitizeOpacity(value: Double): Float {
+ val clamped = value.coerceIn(OPACITY_MIN_VALUE.toDouble(), OPACITY_MAX_VALUE.toDouble())
+ val stepIndex = ((clamped - OPACITY_MIN_VALUE) / OPACITY_STEP_VALUE).roundToInt()
+ return (OPACITY_MIN_VALUE + stepIndex * OPACITY_STEP_VALUE).toFloat().coerceIn(OPACITY_MIN_VALUE, OPACITY_MAX_VALUE)
+ }
+
+ private fun refreshFloatingWidget() {
+ val intent = Intent(reactContext, FloatingWidgetService::class.java).apply {
+ action = FloatingWidgetService.ACTION_REFRESH_WIDGET
+ }
+ reactContext.startService(intent)
  }
 
  @ReactMethod
@@ -262,8 +276,8 @@ class CopyBridgeNativeModule(
   fun getOpacitySettings(promise: Promise) {
     try {
       val prefs = reactContext.getSharedPreferences("copybridge_floating_widget", Context.MODE_PRIVATE)
-      val widgetOpacity = prefs.getFloat("widget_opacity", 1f)
-      val collapsedOpacity = prefs.getFloat("collapsed_opacity", 0.85f)
+      val widgetOpacity = sanitizeOpacity(prefs.getFloat("widget_opacity", OPACITY_DEFAULT_WIDGET).toDouble())
+      val collapsedOpacity = sanitizeOpacity(prefs.getFloat("collapsed_opacity", OPACITY_DEFAULT_COLLAPSED).toDouble())
       val map = Arguments.createMap()
       map.putDouble("widgetOpacity", widgetOpacity.toDouble())
       map.putDouble("collapsedOpacity", collapsedOpacity.toDouble())
@@ -276,15 +290,26 @@ class CopyBridgeNativeModule(
   @ReactMethod
   fun setWidgetOpacity(value: Double, promise: Promise) {
     try {
+      val safeOpacity = sanitizeOpacity(value)
       val prefs = reactContext.getSharedPreferences("copybridge_floating_widget", Context.MODE_PRIVATE)
-      prefs.edit().putFloat("widget_opacity", value.toFloat()).apply()
-      val intent = Intent(reactContext, FloatingWidgetService::class.java).apply {
-        action = FloatingWidgetService.ACTION_REFRESH_WIDGET
-      }
-      reactContext.startService(intent)
-      promise.resolve(value)
+      prefs.edit().putFloat("widget_opacity", safeOpacity).apply()
+      refreshFloatingWidget()
+      promise.resolve(safeOpacity.toDouble())
     } catch (error: Exception) {
       promise.reject("SET_OPACITY_FAILED", error)
+    }
+  }
+
+  @ReactMethod
+  fun setCollapsedOpacity(value: Double, promise: Promise) {
+    try {
+      val safeOpacity = sanitizeOpacity(value)
+      val prefs = reactContext.getSharedPreferences("copybridge_floating_widget", Context.MODE_PRIVATE)
+      prefs.edit().putFloat("collapsed_opacity", safeOpacity).apply()
+      refreshFloatingWidget()
+      promise.resolve(safeOpacity.toDouble())
+    } catch (error: Exception) {
+      promise.reject("SET_COLLAPSED_OPACITY_FAILED", error)
     }
   }
 
@@ -301,4 +326,12 @@ class CopyBridgeNativeModule(
       promise.reject("API_USAGE_READ_FAILED", "Failed to read API usage minutes", error)
     }
   }
+
+    companion object {
+        private const val OPACITY_MIN_VALUE = 0.10f
+        private const val OPACITY_MAX_VALUE = 1.0f
+        private const val OPACITY_STEP_VALUE = 0.05
+        private const val OPACITY_DEFAULT_WIDGET = 1.0f
+        private const val OPACITY_DEFAULT_COLLAPSED = 0.85f
+    }
 }
