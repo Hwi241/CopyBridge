@@ -711,38 +711,22 @@ class FloatingWidgetService : Service() {
 
  if (previousVisible == null) {
  lastBridgePairVisibleForAutoCollapse = bothVisible
-
- when {
- bothVisible && isCollapsed -> {
  appendDebugLog(
  "WIDGET",
- "BRIDGE_VISIBILITY_INITIAL_DUAL_RESTORE_ONCE"
+ "BRIDGE_VISIBILITY_INITIAL_STATE_ONLY current=$bothVisible collapsed=$isCollapsed"
  )
- isCollapsed = false
- saveWidgetPreferences()
- refreshWidgetAtSamePosition()
- }
-
- !bothVisible && !isCollapsed -> {
- appendDebugLog(
- "WIDGET",
- "BRIDGE_VISIBILITY_INITIAL_OUTSIDE_COLLAPSE_ONCE"
- )
- isCollapsed = true
- saveWidgetPreferences()
- refreshWidgetAtSamePosition()
- }
- }
-
  return
  }
 
- if (bothVisible != previousVisible) {
+ if (bothVisible == previousVisible) {
+ return
+ }
+
  lastBridgePairVisibleForAutoCollapse = bothVisible
 
  appendDebugLog(
  "WIDGET",
- "BRIDGE_VISIBILITY_EDGE_CHANGE previous=$previousVisible current=$bothVisible collapsed=$isCollapsed"
+ "BRIDGE_VISIBILITY_EDGE_CHANGE_ONCE previous=$previousVisible current=$bothVisible collapsed=$isCollapsed"
  )
 
  if (bothVisible) {
@@ -755,25 +739,13 @@ class FloatingWidgetService : Service() {
  saveWidgetPreferences()
  refreshWidgetAtSamePosition()
  }
- } else {
+ return
+ }
+
  if (!isCollapsed) {
  appendDebugLog(
  "WIDGET",
  "BRIDGE_VISIBILITY_EXIT_DUAL_COLLAPSE_ONCE"
- )
- isCollapsed = true
- saveWidgetPreferences()
- refreshWidgetAtSamePosition()
- }
- }
-
- return
- }
-
- if (!bothVisible && !isCollapsed) {
- appendDebugLog(
- "WIDGET",
- "BRIDGE_VISIBILITY_OUTSIDE_ENFORCE_COLLAPSE"
  )
  isCollapsed = true
  saveWidgetPreferences()
