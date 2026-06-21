@@ -650,7 +650,41 @@ override fun onServiceConnected() {
     Toast.makeText(this, "CopyBridge 접근성 서비스가 연결되었습니다.", Toast.LENGTH_SHORT).show()
   }
 
-  override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+ 
+ override fun onKeyEvent(event: android.view.KeyEvent): Boolean {
+  if (event.action != android.view.KeyEvent.ACTION_DOWN) {
+   return false
+  }
+
+  if (event.repeatCount > 0) {
+   return false
+  }
+
+  val isEnterKey = event.keyCode == android.view.KeyEvent.KEYCODE_ENTER ||
+   event.keyCode == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER
+
+  if (!isEnterKey) {
+   return false
+  }
+
+  if (!event.isCtrlPressed) {
+   return false
+  }
+
+  if (event.isAltPressed || event.isMetaPressed) {
+   return false
+  }
+
+  val shortcutAction = if (event.isShiftPressed) {
+   CopyBridgeKeyboardShortcutBridge.ACTION_GPT_TO_TELEGRAM
+  } else {
+   CopyBridgeKeyboardShortcutBridge.ACTION_TELEGRAM_TO_GPT
+  }
+
+  return CopyBridgeKeyboardShortcutBridge.handle(shortcutAction)
+ }
+
+ override fun onAccessibilityEvent(event: AccessibilityEvent?) {
     val packageName = event?.packageName?.toString()
     if (!packageName.isNullOrBlank()) {
       lastPackageName = packageName

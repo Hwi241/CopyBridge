@@ -95,6 +95,7 @@ class FloatingWidgetService : Service() {
   }
 
   override fun onCreate() {
+ CopyBridgeKeyboardShortcutBridge.attach(this)
     super.onCreate()
     windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
     preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -127,6 +128,7 @@ class FloatingWidgetService : Service() {
   }
 
   override fun onDestroy() {
+ CopyBridgeKeyboardShortcutBridge.detach(this)
     bridgeVisibilityMonitorRunning = false
     bridgeVisibilityHandler.removeCallbacks(bridgeVisibilityMonitorRunnable)
     apiBalanceHandler.removeCallbacks(apiBalanceRunnable)
@@ -614,7 +616,30 @@ class FloatingWidgetService : Service() {
       .coerceIn(OPACITY_MIN_VALUE, OPACITY_MAX_VALUE)
   }
 
-  private fun createCollapsedView(): View {
+ 
+ fun handleHardwareKeyboardShortcutAction(action: String): Boolean {
+  if (isCollapsed) {
+   appendDebugLog("SHORTCUT", "ignored hardware shortcut while collapsed action=$action")
+   return false
+  }
+
+  return when (action) {
+   CopyBridgeKeyboardShortcutBridge.ACTION_TELEGRAM_TO_GPT -> {
+    appendDebugLog("SHORTCUT", "hardware Ctrl+Enter -> GPT로 보내기 replyMode=$replyCopyModeString autoSend=$autoSendEnabled")
+    runTelegramToGptSmart("normal")
+    true
+   }
+   CopyBridgeKeyboardShortcutBridge.ACTION_GPT_TO_TELEGRAM -> {
+    gptOutputModeString = "CODE"
+    appendDebugLog("SHORTCUT", "hardware Ctrl+Shift+Enter -> 텔레그램으로 보내기 gptMode=CODE autoSend=$autoSendEnabled")
+    CopyBridgeAccessibilityService.requestGptToTelegram(this, "CODE", autoSendEnabled)
+    true
+   }
+   else -> false
+  }
+ }
+
+ private fun createCollapsedView(): View {
     return TextView(this).apply {
       alpha = clampWidgetOpacity(collapsedOpacity)
       text = "B"
