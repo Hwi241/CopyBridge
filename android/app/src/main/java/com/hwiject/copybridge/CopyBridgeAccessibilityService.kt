@@ -651,38 +651,66 @@ override fun onServiceConnected() {
   }
 
  
- override fun onKeyEvent(event: android.view.KeyEvent): Boolean {
-  if (event.action != android.view.KeyEvent.ACTION_DOWN) {
-   return false
+  override fun onKeyEvent(event: android.view.KeyEvent): Boolean {
+    if (event.action != android.view.KeyEvent.ACTION_DOWN) {
+      return false
+    }
+
+    if (event.repeatCount > 0) {
+      return false
+    }
+
+    val captureAction = CopyBridgeKeyboardShortcutSettings.getCaptureAction(this)
+    if (captureAction.isNotBlank()) {
+      val capturedSpec = CopyBridgeKeyboardShortcutSettings.specFromEvent(event)
+      if (capturedSpec == null) {
+        Toast.makeText(
+          this,
+          "Ctrl, Alt, Meta 중 하나 이상을 포함한 단축키를 입력하세요.",
+          Toast.LENGTH_SHORT
+        ).show()
+        appendDebugLog(
+          "SHORTCUT",
+          "capture invalid action=$captureAction keyCode=${event.keyCode} ctrl=${event.isCtrlPressed} shift=${event.isShiftPressed} alt=${event.isAltPressed} meta=${event.isMetaPressed}"
+        )
+        return true
+      }
+
+      val conflictAction = CopyBridgeKeyboardShortcutSettings.conflictAction(this, captureAction, capturedSpec)
+      if (conflictAction.isNotBlank()) {
+        Toast.makeText(
+          this,
+          "이미 ${CopyBridgeKeyboardShortcutSettings.actionLabel(conflictAction)}에 사용 중인 단축키입니다.",
+          Toast.LENGTH_SHORT
+        ).show()
+        appendDebugLog(
+          "SHORTCUT",
+          "capture conflict action=$captureAction conflict=$conflictAction label=${CopyBridgeKeyboardShortcutSettings.labelForSpec(capturedSpec)}"
+        )
+        return true
+      }
+
+      CopyBridgeKeyboardShortcutSettings.saveSpec(this, captureAction, capturedSpec)
+      CopyBridgeKeyboardShortcutSettings.cancelCapture(this)
+
+      Toast.makeText(
+        this,
+        "${CopyBridgeKeyboardShortcutSettings.actionLabel(captureAction)}: ${CopyBridgeKeyboardShortcutSettings.labelForSpec(capturedSpec)} 저장",
+        Toast.LENGTH_SHORT
+      ).show()
+
+      appendDebugLog(
+        "SHORTCUT",
+        "capture saved action=$captureAction label=${CopyBridgeKeyboardShortcutSettings.labelForSpec(capturedSpec)}"
+      )
+      return true
+    }
+
+    val shortcutAction = CopyBridgeKeyboardShortcutSettings.findMatchingAction(this, event) ?: return false
+    return CopyBridgeKeyboardShortcutBridge.handle(shortcutAction)
   }
 
-  if (event.repeatCount > 0) {
-   return false
-  }
 
-  val isEnterKey = event.keyCode == android.view.KeyEvent.KEYCODE_ENTER ||
-   event.keyCode == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER
-
-  if (!isEnterKey) {
-   return false
-  }
-
-  if (!event.isCtrlPressed) {
-   return false
-  }
-
-  if (event.isAltPressed || event.isMetaPressed) {
-   return false
-  }
-
-  val shortcutAction = if (event.isShiftPressed) {
-   CopyBridgeKeyboardShortcutBridge.ACTION_GPT_TO_TELEGRAM
-  } else {
-   CopyBridgeKeyboardShortcutBridge.ACTION_TELEGRAM_TO_GPT
-  }
-
-  return CopyBridgeKeyboardShortcutBridge.handle(shortcutAction)
- }
 
  override fun onAccessibilityEvent(event: AccessibilityEvent?) {
     val packageName = event?.packageName?.toString()

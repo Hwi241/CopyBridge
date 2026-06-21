@@ -38,6 +38,14 @@ const opacityFromLocation = (locationX, width) => {
   const ratio = Math.min(1, Math.max(0, locationX / safeWidth));
   return snapOpacity(OPACITY_MIN + ratio * (OPACITY_MAX - OPACITY_MIN));
 };
+const KEYBOARD_SHORTCUT_ACTION_TELEGRAM_TO_GPT = 'telegram_to_gpt';
+const KEYBOARD_SHORTCUT_ACTION_GPT_TO_TELEGRAM = 'gpt_to_telegram';
+const DEFAULT_KEYBOARD_SHORTCUT_SETTINGS = {
+  telegramToGptLabel: 'Ctrl + Enter',
+  gptToTelegramLabel: 'Ctrl + Shift + Enter',
+  captureAction: '',
+};
+
 const API_USAGE_HOUR_MS = 60 * 60 * 1000;
 const API_USAGE_MINUTE_MS = 60 * 1000;
 const API_USAGE_ROWS_PER_HOUR = 60;
@@ -48,6 +56,9 @@ export default function App() {
   const [collapsedOpacity, setCollapsedOpacity] = useState(0.85);
   const [widgetOpacityTrackWidth, setWidgetOpacityTrackWidth] = useState(1);
   const [collapsedOpacityTrackWidth, setCollapsedOpacityTrackWidth] = useState(1);
+  const [keyboardShortcutSettings, setKeyboardShortcutSettings] = useState(DEFAULT_KEYBOARD_SHORTCUT_SETTINGS);
+  const [keyboardShortcutCaptureAction, setKeyboardShortcutCaptureAction] = useState('');
+  const [keyboardShortcutMessage, setKeyboardShortcutMessage] = useState('');
   const [deepSeekApiKey, setDeepSeekApiKey] = useState('');
   const [deepSeekKeyStatus, setDeepSeekKeyStatus] = useState('$KEY');
   const [deepSeekBalanceStatus, setDeepSeekBalanceStatus] = useState('$KEY');
@@ -83,6 +94,133 @@ export default function App() {
       if (settings && typeof settings.collapsedOpacity === 'number') setCollapsedOpacity(settings.collapsedOpacity);
     } catch (error) {}
   }, []);
+
+const loadKeyboardShortcutSettings = useCallback(async () => {
+    const nativeModule = getNativeModule();
+    if (Platform.OS !== 'android' || !nativeModule || typeof nativeModule.getKeyboardShortcutSettings !== 'function') {
+      setKeyboardShortcutSettings(DEFAULT_KEYBOARD_SHORTCUT_SETTINGS);
+      setKeyboardShortcutCaptureAction('');
+      return;
+    }
+
+    try {
+      const settings = await nativeModule.getKeyboardShortcutSettings();
+      const nextSettings = {
+        telegramToGptLabel: settings?.telegramToGptLabel || DEFAULT_KEYBOARD_SHORTCUT_SETTINGS.telegramToGptLabel,
+        gptToTelegramLabel: settings?.gptToTelegramLabel || DEFAULT_KEYBOARD_SHORTCUT_SETTINGS.gptToTelegramLabel,
+        captureAction: settings?.captureAction || '',
+      };
+
+      setKeyboardShortcutSettings(nextSettings);
+      setKeyboardShortcutCaptureAction(nextSettings.captureAction);
+    } catch (error) {
+      setKeyboardShortcutSettings(DEFAULT_KEYBOARD_SHORTCUT_SETTINGS);
+      setKeyboardShortcutCaptureAction('');
+    }
+  }, []);
+
+  const refreshKeyboardShortcutSettingsFromNative = async (settings) => {
+    const nextSettings = {
+      telegramToGptLabel: settings?.telegramToGptLabel || DEFAULT_KEYBOARD_SHORTCUT_SETTINGS.telegramToGptLabel,
+      gptToTelegramLabel: settings?.gptToTelegramLabel || DEFAULT_KEYBOARD_SHORTCUT_SETTINGS.gptToTelegramLabel,
+      captureAction: settings?.captureAction || '',
+    };
+
+    setKeyboardShortcutSettings(nextSettings);
+    setKeyboardShortcutCaptureAction(nextSettings.captureAction);
+  };
+
+  const startKeyboardShortcutCapture = async (action, label) => {
+    const nativeModule = getNativeModule();
+    if (Platform.OS !== 'android') {
+      Alert.alert('Android\uc804\uc6a9 \uae30\ub2a5', '\ubb3c\ub9ac \ud0a4\ubcf4\ub4dc \ub2e8\ucd95\ud0a4 \uc124\uc815\uc740 Android APK\uc5d0\uc11c \uc0ac\uc6a9\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.');
+      return;
+    }
+
+    if (!nativeModule || typeof nativeModule.startKeyboardShortcutCapture !== 'function') {
+      Alert.alert('\ub124\uc774\ud2f0\ube0c \uc5f0\uacb0 \ud544\uc694', '\ubb3c\ub9ac \ud0a4\ubcf4\ub4dc \ub2e8\ucd95\ud0a4 \uc124\uc815 \uae30\ub2a5\uc774 \uc544\uc9c1 \uc5f0\uacb0\ub418\uc9c0 \uc54a\uc558\uc2b5\ub2c8\ub2e4.');
+      return;
+    }
+
+    try {
+      const settings = await nativeModule.startKeyboardShortcutCapture(action);
+      await refreshKeyboardShortcutSettingsFromNative(settings);
+      setKeyboardShortcutMessage(label + ' \ubcc0\uacbd \ub300\uae30 \uc911\uc785\ub2c8\ub2e4. \ubb3c\ub9ac \ud0a4\ubcf4\ub4dc\uc5d0\uc11c \uc6d0\ud558\ub294 \uc870\ud569\uc744 \ub204\ub974\uc138\uc694.');
+    } catch (error) {
+      Alert.alert('\uc124\uc815 \uc2e4\ud328', '\ub2e8\ucd95\ud0a4 \ubcc0\uacbd \ub300\uae30 \uc0c1\ud0dc\ub97c \uc2dc\uc791\ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.');
+    }
+  };
+
+  const cancelKeyboardShortcutCapture = async () => {
+    const nativeModule = getNativeModule();
+    if (!nativeModule || typeof nativeModule.cancelKeyboardShortcutCapture !== 'function') return;
+
+    try {
+      const settings = await nativeModule.cancelKeyboardShortcutCapture();
+      await refreshKeyboardShortcutSettingsFromNative(settings);
+      setKeyboardShortcutMessage('\ub2e8\ucd95\ud0a4 \ubcc0\uacbd\uc744 \ucde8\uc18c\ud588\uc2b5\ub2c8\ub2e4.');
+    } catch (error) {
+      Alert.alert('\ucde8\uc18c \uc2e4\ud328', '\ub2e8\ucd95\ud0a4 \ubcc0\uacbd \ub300\uae30\ub97c \ucde8\uc18c\ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.');
+    }
+  };
+
+  const resetKeyboardShortcuts = async () => {
+    const nativeModule = getNativeModule();
+    if (Platform.OS !== 'android') {
+      Alert.alert('Android\uc804\uc6a9 \uae30\ub2a5', '\ubb3c\ub9ac \ud0a4\ubcf4\ub4dc \ub2e8\ucd95\ud0a4 \uc124\uc815\uc740 Android APK\uc5d0\uc11c \uc0ac\uc6a9\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.');
+      return;
+    }
+
+    if (!nativeModule || typeof nativeModule.resetKeyboardShortcuts !== 'function') {
+      Alert.alert('\ub124\uc774\ud2f0\ube0c \uc5f0\uacb0 \ud544\uc694', '\ub2e8\ucd95\ud0a4 \ucd08\uae30\ud654 \uae30\ub2a5\uc774 \uc544\uc9c1 \uc5f0\uacb0\ub418\uc9c0 \uc54a\uc558\uc2b5\ub2c8\ub2e4.');
+      return;
+    }
+
+    try {
+      const settings = await nativeModule.resetKeyboardShortcuts();
+      await refreshKeyboardShortcutSettingsFromNative(settings);
+      setKeyboardShortcutMessage('\uae30\ubcf8 \ub2e8\ucd95\ud0a4\ub85c \ucd08\uae30\ud654\ud588\uc2b5\ub2c8\ub2e4.');
+    } catch (error) {
+      Alert.alert('\ucd08\uae30\ud654 \uc2e4\ud328', '\ub2e8\ucd95\ud0a4\ub97c \uae30\ubcf8\uac12\uc73c\ub85c \ucd08\uae30\ud654\ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.');
+    }
+  };
+
+  const renderKeyboardShortcutRow = ({
+    title,
+    description,
+    value,
+    action,
+  }) => {
+    const isCapturing = keyboardShortcutCaptureAction === action;
+
+    return (
+      <View style={styles.shortcutRow}>
+        <View style={styles.shortcutTextBlock}>
+          <Text style={styles.shortcutTitle}>{title}</Text>
+          <Text style={styles.shortcutSubtext}>{description}</Text>
+          <Text style={styles.shortcutValue}>{value}</Text>
+        </View>
+
+        <TouchableOpacity
+          style={[
+            styles.shortcutChangeButton,
+            isCapturing && styles.shortcutChangeButtonActive,
+          ]}
+          activeOpacity={0.82}
+          onPress={() => startKeyboardShortcutCapture(action, title)}
+        >
+          <Text
+            style={[
+              styles.shortcutChangeButtonText,
+              isCapturing && styles.shortcutChangeButtonTextActive,
+            ]}
+          >
+            {isCapturing ? '\uc785\ub825 \ub300\uae30' : '\ubcc0\uacbd'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+    );
+  };
 
   const loadDeepSeekSettings = useCallback(async () => {
     const nativeModule = getNativeModule();
@@ -350,9 +488,21 @@ export default function App() {
   useEffect(() => {
     loadDebugLogs();
     loadOpacitySettings();
+    loadKeyboardShortcutSettings();
     loadDeepSeekSettings();
     loadApiUsageRecords();
-  }, [loadDebugLogs, loadOpacitySettings, loadDeepSeekSettings, loadApiUsageRecords]);
+  }, [loadDebugLogs, loadOpacitySettings, loadKeyboardShortcutSettings, loadDeepSeekSettings, loadApiUsageRecords]);
+
+  useEffect(() => {
+    if (!keyboardShortcutCaptureAction) return undefined;
+
+    const intervalId = setInterval(() => {
+      loadKeyboardShortcutSettings();
+    }, 800);
+
+    return () => clearInterval(intervalId);
+  }, [keyboardShortcutCaptureAction, loadKeyboardShortcutSettings]);
+
   const showNextStepAlert = (label) => {
     Alert.alert(
       '다음 단계에서 연결',
@@ -669,6 +819,51 @@ export default function App() {
               onPreview: previewCollapsedOpacityValue,
               onCommit: setCollapsedOpacityValue,
             })}
+          </View>
+
+        <View style={styles.shortcutCard}>
+            <Text style={styles.sectionTitle}>물리 키보드 단축키</Text>
+            <Text style={styles.shortcutDescription}>
+              플로팅 패널이 펼치져 있을 때만 작동합니다. B 최소화 상태에서는 단축키를 무시합니다.
+            </Text>
+
+            {renderKeyboardShortcutRow({
+              title: 'GPT로 보내기',
+              description: '텔레그램 내용을 GPT 입력창으로 보냅니다.',
+              value: keyboardShortcutSettings.telegramToGptLabel,
+              action: KEYBOARD_SHORTCUT_ACTION_TELEGRAM_TO_GPT,
+            })}
+
+            {renderKeyboardShortcutRow({
+              title: '텔레그램으로 보내기',
+              description: 'GPT 답변을 텔레그램 입력창으로 보냅니다.',
+              value: keyboardShortcutSettings.gptToTelegramLabel,
+              action: KEYBOARD_SHORTCUT_ACTION_GPT_TO_TELEGRAM,
+            })}
+
+            {keyboardShortcutMessage ? (
+              <Text style={styles.shortcutMessage}>{keyboardShortcutMessage}</Text>
+            ) : null}
+
+            <View style={styles.shortcutActionRow}>
+              <TouchableOpacity
+                style={styles.shortcutResetButton}
+                activeOpacity={0.82}
+                onPress={resetKeyboardShortcuts}
+              >
+                <Text style={styles.shortcutResetButtonText}>기본값으로 초기화</Text>
+              </TouchableOpacity>
+
+              {keyboardShortcutCaptureAction ? (
+                <TouchableOpacity
+                  style={styles.shortcutCancelButton}
+                  activeOpacity={0.82}
+                  onPress={cancelKeyboardShortcutCapture}
+                >
+                  <Text style={styles.shortcutCancelButtonText}>취소</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
           </View>
 
           <View style={styles.logCard}>
@@ -1207,6 +1402,115 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: '#8B8176',
+  },
+  shortcutCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 18,
+    marginBottom: 18,
+    shadowColor: '#000000',
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 3,
+  },
+  shortcutDescription: {
+    marginTop: -8,
+    marginBottom: 14,
+    fontSize: 13,
+    lineHeight: 19,
+    color: '#817A70',
+  },
+  shortcutRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#ECE6DD',
+  },
+  shortcutTextBlock: {
+    flex: 1,
+  },
+  shortcutTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#222222',
+  },
+  shortcutSubtext: {
+    marginTop: 4,
+    fontSize: 12,
+    lineHeight: 17,
+    color: '#817A70',
+  },
+  shortcutValue: {
+    marginTop: 8,
+    alignSelf: 'flex-start',
+    borderRadius: 12,
+    backgroundColor: '#F3F0EA',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#171717',
+  },
+  shortcutChangeButton: {
+    minWidth: 78,
+    height: 42,
+    borderRadius: 14,
+    backgroundColor: '#171717',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  shortcutChangeButtonActive: {
+    backgroundColor: '#8B735A',
+  },
+  shortcutChangeButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  shortcutChangeButtonTextActive: {
+    color: '#FFFFFF',
+  },
+  shortcutMessage: {
+    marginTop: 6,
+    fontSize: 12,
+    lineHeight: 18,
+    color: '#6B665E',
+    fontWeight: '700',
+  },
+  shortcutActionRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 12,
+  },
+  shortcutResetButton: {
+    flex: 1,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: '#F3F0EA',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  shortcutResetButtonText: {
+    color: '#222222',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  shortcutCancelButton: {
+    width: 72,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: '#333333',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  shortcutCancelButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
   },
   logCard: {
     backgroundColor: '#FFFFFF',

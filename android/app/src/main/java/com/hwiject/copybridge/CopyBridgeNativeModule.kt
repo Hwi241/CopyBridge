@@ -313,7 +313,72 @@ class CopyBridgeNativeModule(
     }
   }
 
+
+  private fun buildKeyboardShortcutSettingsMap() = Arguments.createMap().apply {
+    val telegramToGptAction = CopyBridgeKeyboardShortcutBridge.ACTION_TELEGRAM_TO_GPT
+    val gptToTelegramAction = CopyBridgeKeyboardShortcutBridge.ACTION_GPT_TO_TELEGRAM
+    val telegramToGptSpec = CopyBridgeKeyboardShortcutSettings.getSpec(reactContext, telegramToGptAction)
+    val gptToTelegramSpec = CopyBridgeKeyboardShortcutSettings.getSpec(reactContext, gptToTelegramAction)
+
+    putString("telegramToGptLabel", CopyBridgeKeyboardShortcutSettings.labelForSpec(telegramToGptSpec))
+    putString("gptToTelegramLabel", CopyBridgeKeyboardShortcutSettings.labelForSpec(gptToTelegramSpec))
+    putString("captureAction", CopyBridgeKeyboardShortcutSettings.getCaptureAction(reactContext))
+  }
+
+
+  
+
   @ReactMethod
+  fun getKeyboardShortcutSettings(promise: Promise) {
+    try {
+      promise.resolve(buildKeyboardShortcutSettingsMap())
+    } catch (error: Exception) {
+      promise.reject("GET_KEYBOARD_SHORTCUT_SETTINGS_FAILED", error)
+    }
+  }
+
+  @ReactMethod
+  fun startKeyboardShortcutCapture(action: String, promise: Promise) {
+    try {
+      if (!CopyBridgeKeyboardShortcutSettings.isSupportedAction(action)) {
+        promise.reject("KEYBOARD_SHORTCUT_ACTION_UNSUPPORTED", "Unsupported shortcut action: $action")
+        return
+      }
+
+      CopyBridgeKeyboardShortcutSettings.startCapture(reactContext, action)
+      Toast.makeText(
+        reactContext,
+        "${CopyBridgeKeyboardShortcutSettings.actionLabel(action)} 단축키를 입력하세요.",
+        Toast.LENGTH_SHORT
+      ).show()
+      promise.resolve(buildKeyboardShortcutSettingsMap())
+    } catch (error: Exception) {
+      promise.reject("START_KEYBOARD_SHORTCUT_CAPTURE_FAILED", error)
+    }
+  }
+
+  @ReactMethod
+  fun cancelKeyboardShortcutCapture(promise: Promise) {
+    try {
+      CopyBridgeKeyboardShortcutSettings.cancelCapture(reactContext)
+      promise.resolve(buildKeyboardShortcutSettingsMap())
+    } catch (error: Exception) {
+      promise.reject("CANCEL_KEYBOARD_SHORTCUT_CAPTURE_FAILED", error)
+    }
+  }
+
+  @ReactMethod
+  fun resetKeyboardShortcuts(promise: Promise) {
+    try {
+      CopyBridgeKeyboardShortcutSettings.reset(reactContext)
+      Toast.makeText(reactContext, "단축키를 기본값으로 초기화했습니다.", Toast.LENGTH_SHORT).show()
+      promise.resolve(buildKeyboardShortcutSettingsMap())
+    } catch (error: Exception) {
+      promise.reject("RESET_KEYBOARD_SHORTCUTS_FAILED", error)
+    }
+  }
+
+@ReactMethod
   fun getApiUsageMinutes(promise: Promise) {
     try {
       val prefs = reactContext.getSharedPreferences(
