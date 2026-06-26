@@ -37,5 +37,18 @@
         <category android:name="android.intent.category.LAUNCHER"/>
       </intent-filter>
     </activity>
-  </application>
+  
+ <service
+ android:name=".CopyBridgeInputMethodService"
+ android:exported="true"
+ android:label="CopyBridge Keyboard"
+ android:permission="android.permission.BIND_INPUT_METHOD">
+ <intent-filter>
+ <action android:name="android.view.InputMethod" />
+ </intent-filter>
+ <meta-data
+ android:name="android.view.im"
+ android:resource="@xml/copybridge_ime" />
+ </service>
+</application>
 </manifest>

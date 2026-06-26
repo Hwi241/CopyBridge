@@ -3432,37 +3432,145 @@ override fun onServiceConnected() {
     return latestRoots
   }
 
-  private fun findAiEditableWithRetryForTgToGpt(
-    initialRoots: List<AccessibilityNodeInfo>,
-    maxAttempts: Int = TG_TO_GPT_FIND_RETRY_COUNT,
-    delayMs: Long = TG_TO_GPT_FIND_RETRY_DELAY_MS
-  ): Pair<AccessibilityNodeInfo?, List<AccessibilityNodeInfo>> {
-    var latestRoots = initialRoots
+ 
 
-    for (attempt in 1..maxAttempts) {
-      if (latestRoots.isEmpty()) {
-        latestRoots = getAiRoots()
-      }
+ private fun queueTextForImeFallbackForTgToGpt(text: String, autoSend: Boolean, reason: String, roots: List<AccessibilityNodeInfo>): Boolean {
+ val trimmedText = text.trim()
+ if (trimmedText.isEmpty()) { appendDebugLog("TG→GPT", "TG_TO_GPT_IME_FALLBACK_QUEUE skipped=true reason=$reason emptyText=true"); return false }
+ val pendingId = System.currentTimeMillis()
+ val prefs = getSharedPreferences("copybridge_ime_prefs", android.content.Context.MODE_PRIVATE)
+ prefs.edit().putLong("pending_id", pendingId).putString("pending_text", trimmedText).putBoolean("pending_auto_send", autoSend).putString("pending_reason", reason).putLong("queued_at", pendingId).putLong("consumed_id", 0L).putLong("committed_id", 0L).putBoolean("commit_ok", false).putLong("committed_at", 0L).putBoolean("editor_action_ok", false).putLong("editor_action_at", 0L).putString("ime_last_event", "queued").putString("ime_last_trigger", "accessibility_queue").putString("ime_last_status", "pending_saved").putBoolean("ime_last_has_connection", false).putLong("ime_last_pending_id", pendingId).putInt("ime_last_text_length", trimmedText.length).putLong("ime_last_at", pendingId).putString("ime_last_error", "").apply()
+ appendDebugLog("TG→GPT", "TG_TO_GPT_IME_FALLBACK_QUEUED pendingId=$pendingId reason=$reason textLength=${trimmedText.length} autoSend=$autoSend roots=${roots.size}")
+ logImeSystemStatusForTgToGpt("afterQueue:$reason:$pendingId")
+ tapLikelyAiInputAreaForTgToGpt(roots, "imeFallback:$reason")
+ val immediateRequested = try { CopyBridgeInputMethodService.requestCommitNow("immediate:$reason:$pendingId") } catch (error: Exception) { appendDebugLog("TG→GPT", "TG_TO_GPT_IME_REQUEST_COMMIT_ERROR phase=immediate pendingId=$pendingId reason=$reason ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"); false }
+ appendDebugLog("TG→GPT", "TG_TO_GPT_IME_REQUEST_COMMIT_NOW phase=immediate pendingId=$pendingId requested=$immediateRequested reason=$reason")
+ logImeSystemStatusForTgToGpt("afterImmediateRequest:$reason:$pendingId")
+ listOf(300L, 900L, 1600L, 2800L).forEachIndexed { index, delayMs -> android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ val requested = try { CopyBridgeInputMethodService.requestCommitNow("delayed$index:$reason:$pendingId") } catch (error: Exception) { appendDebugLog("TG→GPT", "TG_TO_GPT_IME_REQUEST_COMMIT_ERROR phase=delayed$index pendingId=$pendingId reason=$reason ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"); false }; appendDebugLog("TG→GPT", "TG_TO_GPT_IME_REQUEST_COMMIT_NOW phase=delayed$index delayMs=$delayMs pendingId=$pendingId requested=$requested reason=$reason") }, delayMs) }
+ android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+ val committedId = prefs.getLong("committed_id", 0L); val commitOk = prefs.getBoolean("commit_ok", false)
+ if (committedId == pendingId && commitOk) { appendDebugLog("TG→GPT", "TG_TO_GPT_IME_PICKER_SKIPPED pendingId=$pendingId reason=$reason alreadyCommitted=true"); return@postDelayed }
+ try { val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager; imm?.showInputMethodPicker(); appendDebugLog("TG→GPT", "TG_TO_GPT_IME_PICKER_SHOWN pendingId=$pendingId reason=$reason delayMs=650"); logImeSystemStatusForTgToGpt("afterPickerShown:$reason:$pendingId") } catch (error: Exception) { appendDebugLog("TG→GPT", "TG_TO_GPT_IME_PICKER_ERROR pendingId=$pendingId reason=$reason ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}") }
+ }, 650L)
+ scheduleImeFallbackResultChecksForTgToGpt(pendingId, autoSend, reason)
+ return true
+ }
 
-      val editNode = findEditableNodeFromRoots(latestRoots)
+ private fun scheduleImeFallbackResultChecksForTgToGpt(pendingId: Long, autoSend: Boolean, reason: String) {
+ val sentOnce = java.util.concurrent.atomic.AtomicBoolean(false)
+ listOf(900L, 1800L, 3200L, 5000L, 7200L).forEachIndexed { index, delayMs -> android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+ val prefs = getSharedPreferences("copybridge_ime_prefs", android.content.Context.MODE_PRIVATE)
+ val data = (listOf(
+ "committed_id" to prefs.getLong("committed_id", 0L).toString(),
+ "commit_ok" to prefs.getBoolean("commit_ok", false).toString(),
+ "committed_at" to prefs.getLong("committed_at", 0L).toString(),
+ "editor_action_ok" to prefs.getBoolean("editor_action_ok", false).toString(),
+ "editor_action_at" to prefs.getLong("editor_action_at", 0L).toString(),
+ "ime_alive" to prefs.getBoolean("ime_alive", false).toString(),
+ "ime_event" to prefs.getString("ime_last_event", "").orEmpty(),
+ "ime_trigger" to prefs.getString("ime_last_trigger", "").orEmpty(),
+ "ime_status" to prefs.getString("ime_last_status", "").orEmpty(),
+ "ime_has_connection" to prefs.getBoolean("ime_last_has_connection", false).toString(),
+ "ime_pending_id" to prefs.getLong("ime_last_pending_id", 0L).toString(),
+ "ime_text_length" to prefs.getInt("ime_last_text_length", 0).toString(),
+ "ime_last_at" to prefs.getLong("ime_last_at", 0L).toString(),
+ "ime_error" to prefs.getString("ime_last_error", "").orEmpty()
+ ).joinToString(" "))
+ if (index == 0) { logImeSystemStatusForTgToGpt("fallbackCheck0:$reason:$pendingId") }
+ appendDebugLog("TG→GPT", "TG_TO_GPT_IME_FALLBACK_CHECK index=$index delayMs=$delayMs pendingId=$pendingId autoSend=$autoSend reason=$reason data=$data")
+ if (prefs.getBoolean("commit_ok", false) && autoSend && sentOnce.compareAndSet(false, true)) {
+ val roots = getAiRootsWithRetryForTgToGpt("TG_TO_GPT_IME_AUTOSEND_ROOTS_$index")
+ val sent = clickAiSendButton(roots); appendDebugLog("TG→GPT", "TG_TO_GPT_IME_AUTOSEND_ATTEMPT index=$index pendingId=$pendingId roots=${roots.size} sent=$sent reason=$reason")
+ }
+ }, delayMs) }
+ }
 
-      appendDebugLog(
-        "TG→GPT",
-        "TG_TO_GPT_FIND_EDIT attempt=$attempt roots=${latestRoots.size} found=${editNode != null}"
-      )
+ private fun logImeSystemStatusForTgToGpt(reason: String) {
+ val component = android.content.ComponentName(this, CopyBridgeInputMethodService::class.java)
+ val componentShort = component.flattenToShortString(); val componentFull = component.flattenToString()
+ var defaultIme = ""; var defaultImeReadable = true; var defaultImeError = ""
+ try { defaultIme = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.DEFAULT_INPUT_METHOD).orEmpty() } catch (error: Exception) { defaultImeReadable = false; defaultImeError = "${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}" }
+ var enabledImeSetting = ""; var enabledImeReadable = true; var enabledImeError = ""
+ try { enabledImeSetting = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ENABLED_INPUT_METHODS).orEmpty() } catch (error: Exception) { enabledImeReadable = false; enabledImeError = "${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}" }
+ val defaultIsCopy = defaultIme.contains(packageName) && defaultIme.contains("CopyBridgeInputMethodService")
+ val enabledSettingHasCopy = enabledImeSetting.contains(packageName) && enabledImeSetting.contains("CopyBridgeInputMethodService")
+ appendDebugLog("TG→GPT", "TG_TO_GPT_IME_SYSTEM_SETTINGS reason=$reason componentShort=$componentShort componentFull=$componentFull defaultReadable=$defaultImeReadable defaultIme=${compactLogPreview(defaultIme)} defaultIsCopy=$defaultIsCopy defaultError=${compactLogPreview(defaultImeError)} enabledReadable=$enabledImeReadable enabledSettingHasCopy=$enabledSettingHasCopy enabledSetting=${compactLogPreview(enabledImeSetting)} enabledError=${compactLogPreview(enabledImeError)}")
+ try { val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager; val enabledList = imm?.enabledInputMethodList.orEmpty()
+ val enabledSummary = enabledList.mapIndexed { index, info -> val subtypeCount = try { info.subtypeCount } catch (_: Exception) { -1 }; val subtypeSummary = try { val parts = mutableListOf<String>(); for (subIndex in 0 until subtypeCount.coerceAtLeast(0)) { val subtype = info.getSubtypeAt(subIndex); parts.add("sub[$subIndex]:mode=${subtype.mode},locale=${subtype.locale},extra=${compactLogPreview(subtype.extraValue)}") }; parts.joinToString(",") } catch (error: Exception) { "subtypeError=${error::class.java.simpleName}" }; "$index:id=${compactLogPreview(info.id)} pkg=${info.packageName} service=${info.serviceName} subtypes=$subtypeCount $subtypeSummary" }.joinToString(" ; ")
+ val copyInEnabledList = enabledList.any { info -> info.packageName == packageName && (info.serviceName.contains("CopyBridgeInputMethodService") || info.id.contains("CopyBridgeInputMethodService")) }
+ appendDebugLog("TG→GPT", "TG_TO_GPT_IME_SYSTEM_LIST reason=$reason enabledListCount=${enabledList.size} copyInEnabledList=$copyInEnabledList enabledList=${compactLogPreview(enabledSummary)}")
+ } catch (error: Exception) { appendDebugLog("TG→GPT", "TG_TO_GPT_IME_SYSTEM_LIST_ERROR reason=$reason ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}") }
+ }
+ private fun getAiRootsDeepForTgToGpt(baseRoots: List<AccessibilityNodeInfo>, logReason: String): List<AccessibilityNodeInfo> {
+ val roots = mutableListOf<AccessibilityNodeInfo>()
+ fun addRoot(root: AccessibilityNodeInfo?, source: String) {
+ if (root == null) return
+ try { root.refresh() } catch (_: Exception) {}
+ val packageName = root.packageName?.toString().orEmpty()
+ if (!packageName.contains("openai", ignoreCase = true) && !isAiPackage(packageName)) return
+ val rect = android.graphics.Rect(); root.getBoundsInScreen(rect); roots.add(root)
+ appendDebugLog("TG→GPT", "TG_TO_GPT_DEEP_ROOT source=$source reason=$logReason package=$packageName class=${root.className} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} childCount=${root.childCount}")
+ }
+ baseRoots.forEachIndexed { index, root -> addRoot(root, "base[$index]") }
+ try { if (android.os.Build.VERSION.SDK_INT >= 33) { addRoot(getRootInActiveWindow(AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID or AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE), "activePrefetchHybrid") } else { addRoot(rootInActiveWindow, "activeLegacy") } } catch (error: Exception) { appendDebugLog("TG→GPT", "TG_TO_GPT_DEEP_ROOT_ACTIVE_ERROR reason=$logReason ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}") }
+ try { val windowList = windows ?: emptyList(); appendDebugLog("TG→GPT", "TG_TO_GPT_DEEP_WINDOWS reason=$logReason count=${windowList.size}")
+ windowList.forEachIndexed { index, window -> try { val root = if (android.os.Build.VERSION.SDK_INT >= 33) { window.getRoot(AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID or AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE) } else { window.root }; addRoot(root, "window[$index]:type=${window.type}") } catch (error: Exception) { appendDebugLog("TG→GPT", "TG_TO_GPT_DEEP_WINDOW_ROOT_ERROR reason=$logReason index=$index ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}") } } } catch (error: Exception) { appendDebugLog("TG→GPT", "TG_TO_GPT_DEEP_WINDOWS_ERROR reason=$logReason ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}") }
+ val deduped = roots.distinctBy { node -> val rect = android.graphics.Rect(); node.getBoundsInScreen(rect); "${node.packageName}|${node.className}|${rect.left},${rect.top},${rect.right},${rect.bottom}|${node.childCount}" }
+ appendDebugLog("TG→GPT", "TG_TO_GPT_DEEP_ROOTS_DONE reason=$logReason base=${baseRoots.size} raw=${roots.size} deduped=${deduped.size}")
+ return deduped
+ }
 
-      if (editNode != null) {
-        return editNode to latestRoots
-      }
+ private fun tapLikelyAiInputAreaForTgToGpt(roots: List<AccessibilityNodeInfo>, reason: String): Boolean {
+ val root = roots.firstOrNull() ?: run { appendDebugLog("TG→GPT", "TG_TO_GPT_DEEP_INPUT_TAP skipped=true reason=$reason noRoot=true"); return false }
+ val rect = android.graphics.Rect(); root.getBoundsInScreen(rect)
+ if (rect.width() <= 0 || rect.height() <= 0) { appendDebugLog("TG→GPT", "TG_TO_GPT_DEEP_INPUT_TAP skipped=true reason=$reason invalidBounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"); return false }
+ val tapX = rect.left + (rect.width() * 0.50f).toInt(); val tapY = rect.top + (rect.height() * 0.91f).toInt()
+ val path = android.graphics.Path().apply { moveTo(tapX.toFloat(), tapY.toFloat()) }
+ val gesture = android.accessibilityservice.GestureDescription.Builder().addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0L, 80L)).build()
+ val dispatched = try { dispatchGesture(gesture, null, null) } catch (error: Exception) { appendDebugLog("TG→GPT", "TG_TO_GPT_DEEP_INPUT_TAP_ERROR reason=$reason ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"); false }
+ appendDebugLog("TG→GPT", "TG_TO_GPT_DEEP_INPUT_TAP reason=$reason dispatched=$dispatched tapX=$tapX tapY=$tapY rootBounds=${rect.left},${rect.top},${rect.right},${rect.bottom}")
+ return dispatched
+ }
 
-      if (attempt < maxAttempts) {
-        android.os.SystemClock.sleep(delayMs)
-        latestRoots = getAiRoots()
-      }
-    }
+ private fun logAiInputCandidateProbeForTgToGpt(roots: List<AccessibilityNodeInfo>, reason: String, maxLogs: Int = 28) {
+ val candidates = mutableListOf<String>()
+ fun visit(node: AccessibilityNodeInfo?, depth: Int) {
+ if (node == null || candidates.size >= maxLogs) return
+ val rect = android.graphics.Rect(); node.getBoundsInScreen(rect)
+ val className = node.className?.toString().orEmpty(); val textValue = node.text?.toString().orEmpty(); val descValue = node.contentDescription?.toString().orEmpty()
+ val hintValue = if (android.os.Build.VERSION.SDK_INT >= 26) { node.hintText?.toString().orEmpty() } else { "" }
+ val packageName = node.packageName?.toString().orEmpty(); val actionIds = node.actionList.joinToString("|") { it.id.toString() }
+ val lower = "$className $textValue $descValue $hintValue".lowercase()
+ val looksLikeInput = node.isEditable || className.contains("EditText", true) || node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT } || node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_PASTE } || node.isFocused || node.isAccessibilityFocused || lower.contains("message") || lower.contains("메시지") || lower.contains("prompt") || lower.contains("ask") || lower.contains("send") || lower.contains("전송") || lower.contains("입력")
+ val inLowerArea = roots.firstOrNull()?.let { root -> val rootRect = android.graphics.Rect(); root.getBoundsInScreen(rootRect); rect.top >= rootRect.top + (rootRect.height() * 0.55f).toInt() } ?: false
+ if (looksLikeInput || inLowerArea) { candidates.add("depth=$depth package=$packageName class=$className editable=${node.isEditable} focused=${node.isFocused} aFocused=${node.isAccessibilityFocused} enabled=${node.isEnabled} clickable=${node.isClickable} actions=$actionIds bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} text=${compactLogPreview(textValue)} desc=${compactLogPreview(descValue)} hint=${compactLogPreview(hintValue)}") }
+ for (index in 0 until node.childCount) { visit(node.getChild(index), depth + 1) }
+ }
+ roots.forEach { root -> visit(root, 0) }
+ appendDebugLog("TG→GPT", "TG_TO_GPT_DEEP_CANDIDATE_PROBE reason=$reason roots=${roots.size} candidates=${candidates.size}")
+ candidates.take(maxLogs).forEachIndexed { index, line -> appendDebugLog("TG→GPT", "TG_TO_GPT_DEEP_CANDIDATE[$index] reason=$reason $line") }
+ }
 
-    return null to latestRoots
-  }
+ private fun findAiEditableWithRetryForTgToGpt(initialRoots: List<AccessibilityNodeInfo>): Pair<AccessibilityNodeInfo?, List<AccessibilityNodeInfo>> {
+ appendDebugLog("TG→GPT", "CB_BUILD_MARKER_203_22_OFFICIAL_DEEP")
+ var latestRoots = initialRoots; var latestSearchRoots = initialRoots
+ for (attempt in 1..5) {
+ val reason = "attempt=$attempt"
+ val deepRoots = getAiRootsDeepForTgToGpt(latestRoots, reason)
+ val searchRoots = (latestRoots + deepRoots).distinctBy { node -> val rect = android.graphics.Rect(); node.getBoundsInScreen(rect); "${node.packageName}|${node.className}|${rect.left},${rect.top},${rect.right},${rect.bottom}|${node.childCount}" }
+ latestSearchRoots = searchRoots
+ val found = findEditableNodeFromRoots(searchRoots)
+ appendDebugLog("TG→GPT", "TG_TO_GPT_FIND_EDIT attempt=$attempt roots=${searchRoots.size} baseRoots=${latestRoots.size} deepRoots=${deepRoots.size} found=${found != null}")
+ if (found != null) { val rect = android.graphics.Rect(); found.getBoundsInScreen(rect); appendDebugLog("TG→GPT", "TG_TO_GPT_FIND_EDIT_FOUND_DEEP attempt=$attempt class=${found.className} editable=${found.isEditable} focused=${found.isFocused} actions=${found.actionList.joinToString("|") { it.id.toString() }} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} text=${compactLogPreview(found.text?.toString().orEmpty())} hint=${if (android.os.Build.VERSION.SDK_INT >= 26) compactLogPreview(found.hintText?.toString().orEmpty()) else ""}"); return Pair(found, searchRoots) }
+ if (attempt == 1 || attempt == 5) { logAiInputCandidateProbeForTgToGpt(searchRoots, "notFound:$reason") }
+ if (attempt == 1 || attempt == 2) { tapLikelyAiInputAreaForTgToGpt(searchRoots, "notFound:$reason") }
+ android.os.SystemClock.sleep(when (attempt) { 1 -> 260L; 2 -> 620L; else -> 250L })
+ val refreshedRoots = getAiRootsWithRetryForTgToGpt("TG_TO_GPT_DEEP_REFRESH_ROOTS_$attempt")
+ if (refreshedRoots.isNotEmpty()) { latestRoots = refreshedRoots }
+ }
+ logAiInputCandidateProbeForTgToGpt(latestSearchRoots, "finalNotFound")
+ return Pair(null, latestSearchRoots)
+ }
 
   private fun buildAiWindowDebugInfo(reason: String, roots: List<AccessibilityNodeInfo>): String {
     val builder = StringBuilder()
@@ -3818,19 +3926,13 @@ override fun onServiceConnected() {
         "TG_TO_GPT_AI_EDIT_FOUND value=${aiEdit != null} roots=${editResult.second.size}"
       )
 
-      if (aiEdit == null) {
-        service.copyToClipboard(textToSend)
-        service.appendDebugLog(
-          "TG→GPT",
-          "TG_TO_GPT_BLOCKED reason=noAiEditAfterRetry textLength=${textToSend.length}"
-        )
-        Toast.makeText(
-          context,
-          "GPT 입력창을 찾지 못했습니다. 텍스트는 복사되었습니다. GPT 입력창을 한 번 터치한 뒤 다시 시도해주세요.",
-          Toast.LENGTH_LONG
-        ).show()
-        return true
-      }
+       if (aiEdit == null) {
+ service.copyToClipboard(textToSend)
+ val imeQueued = service.queueTextForImeFallbackForTgToGpt(text = textToSend, autoSend = autoSend, reason = "noAiEditAfterRetry", roots = editResult.second)
+ service.appendDebugLog("TG→GPT", "TG_TO_GPT_BLOCKED reason=noAiEditAfterRetry textLength=${textToSend.length} imeFallbackQueued=$imeQueued")
+ Toast.makeText(context, if (imeQueued) { "GPT 입력창을 찾지 못했습니다. 텍스트는 복사했고, CopyBridge 키보드로 IME 입력을 시도합니다. 키보드 선택창에서 CopyBridge Keyboard를 선택하세요." } else { "GPT 입력창을 찾지 못했습니다. 텍스트는 복사되었습니다." }, Toast.LENGTH_LONG).show()
+ return true
+ }
 
       val setTextOk = service.setTextToNode(aiEdit, textToSend)
 

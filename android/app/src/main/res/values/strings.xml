@@ -3,4 +3,5 @@
   <string name="expo_splash_screen_resize_mode" translatable="false">contain</string>
   <string name="expo_splash_screen_status_bar_translucent" translatable="false">false</string>
  <string name="accessibility_service_description">Telegram 화면의 텍스트를 읽고 AI 답변을 입력창에 붙여넣기 위해 사용합니다.</string>
+ <string name="copybridge_ime_subtype_label">CopyBridge Keyboard</string>
 </resources>
