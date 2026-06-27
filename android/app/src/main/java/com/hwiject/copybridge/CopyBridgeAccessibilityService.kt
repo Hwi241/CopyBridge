@@ -3404,6 +3404,31 @@ override fun onServiceConnected() {
     }
   }
 
+  private fun isTelegramToGptCopyOnlyMode(): Boolean = true
+
+  private fun finishTelegramToGptCopyOnly(
+    context: Context,
+    textToSend: String,
+    copyMode: String,
+    autoSend: Boolean
+  ): Boolean {
+    copyToClipboard(textToSend)
+
+    appendDebugLog(
+      "TG→GPT",
+      "TG_TO_GPT_COPY_ONLY_DONE textLength=${textToSend.length} copyMode=$copyMode autoSendIgnored=$autoSend"
+    )
+
+    Toast.makeText(
+      context,
+      "GPT에 붙여넣을 내용이 복사되었습니다.",
+      Toast.LENGTH_SHORT
+    ).show()
+
+    return true
+  }
+
+
   private fun getAiRootsWithRetryForTgToGpt(
     label: String,
     maxAttempts: Int = TG_TO_GPT_FIND_RETRY_COUNT,
@@ -3899,6 +3924,15 @@ override fun onServiceConnected() {
         "TG→GPT",
         "TG_TO_GPT_SELECTED count=${selectedTexts.size} textLength=${textToSend.length} preview=${service.compactLogPreview(textToSend)}"
       )
+
+      if (service.isTelegramToGptCopyOnlyMode()) {
+        return service.finishTelegramToGptCopyOnly(
+          context = context,
+          textToSend = textToSend,
+          copyMode = copyMode,
+          autoSend = autoSend
+        )
+      }
 
       val aiRoots = service.getAiRootsWithRetryForTgToGpt("TG_TO_GPT_AI_ROOTS")
       if (aiRoots.isEmpty()) {
