@@ -820,7 +820,7 @@ class FloatingWidgetService : Service() {
   ): TextView {
     return TextView(this).apply {
       text = apiBalanceText
-      setTextColor(Color.parseColor("#FACC15"))
+      setTextColor(getApiBalanceTextColor())
       textSize = textSizeValue
       typeface = Typeface.DEFAULT_BOLD
       gravity = Gravity.CENTER
@@ -833,7 +833,39 @@ class FloatingWidgetService : Service() {
   }
 
   private fun updateApiBalanceBoxText() {
-    apiBalanceTextView?.text = apiBalanceText
+    apiBalanceTextView?.apply {
+      text = apiBalanceText
+      setTextColor(getApiBalanceTextColor())
+    }
+  }
+
+  private fun getApiBalanceTextColor(): Int {
+    return if (isDeepSeekPeakPricingTimeUtc8()) {
+      Color.parseColor(DEEPSEEK_PEAK_BALANCE_TEXT_COLOR)
+    } else {
+      Color.parseColor(DEEPSEEK_NORMAL_BALANCE_TEXT_COLOR)
+    }
+  }
+
+  private fun isDeepSeekPeakPricingTimeUtc8(
+    nowMillis: Long = System.currentTimeMillis()
+  ): Boolean {
+    val calendar = java.util.Calendar.getInstance(
+      java.util.TimeZone.getTimeZone("GMT+08:00")
+    ).apply {
+      timeInMillis = nowMillis
+    }
+
+    val hour = calendar.get(java.util.Calendar.HOUR_OF_DAY)
+    val minuteOfDay = hour * 60 + calendar.get(java.util.Calendar.MINUTE)
+
+    val morningPeakStart = 9 * 60
+    val morningPeakEnd = 12 * 60
+    val afternoonPeakStart = 14 * 60
+    val afternoonPeakEnd = 18 * 60
+
+    return (minuteOfDay >= morningPeakStart && minuteOfDay < morningPeakEnd) ||
+      (minuteOfDay >= afternoonPeakStart && minuteOfDay < afternoonPeakEnd)
   }
 
   private fun startDeepSeekBalanceAutoRefresh() {
@@ -1264,6 +1296,8 @@ class FloatingWidgetService : Service() {
     private const val BUTTON_PRESS_OUT_DURATION_MS = 110L
     private const val BRIDGE_VISIBILITY_MONITOR_INTERVAL_MS = 1000L
     private const val API_BALANCE_REFRESH_INTERVAL_MS = 60_000L
+    private const val DEEPSEEK_NORMAL_BALANCE_TEXT_COLOR = "#FACC15"
+    private const val DEEPSEEK_PEAK_BALANCE_TEXT_COLOR = "#EF4444"
     private const val API_BALANCE_RECENT_WINDOW_MS = 5 * 60_000L
     private const val API_BALANCE_HISTORY_WINDOW_MS = 10 * 60_000L
     private const val API_BALANCE_WARNING_MULTIPLIER = 1.5
