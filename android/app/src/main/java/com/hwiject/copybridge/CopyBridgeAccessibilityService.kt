@@ -47,7 +47,6 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   private var bridgeLastTelegramStartSmallScreenBackUsedAtMs: Long = 0L
   private val bridgeTelegramStartSmallScreenBackWindowMs: Long = 5500L
 
-
   private fun rememberGptToTelegramStartFocus(source: String) {
     val nowMs = System.currentTimeMillis()
     val activePackage = try {
@@ -711,7 +710,6 @@ override fun onServiceConnected() {
   }
 
 
-
  override fun onAccessibilityEvent(event: AccessibilityEvent?) {
     val packageName = event?.packageName?.toString()
     if (!packageName.isNullOrBlank()) {
@@ -1082,7 +1080,6 @@ override fun onServiceConnected() {
   }
 
 
-
   private fun closeTelegramKeyboardWithBackIfInputStillFocused(source: String): Boolean {
     val roots = getTelegramRoots()
     if (roots.isEmpty()) {
@@ -1142,7 +1139,6 @@ override fun onServiceConnected() {
     } else {
       false
     }
-
 
     val allowBackForKeyboardClose = shouldAllowTelegramKeyboardBackAfterSend(selectedRootRect)
     val allowTelegramStartSmallScreenBack = shouldAllowTelegramStartSmallScreenBackAfterSend(
@@ -1235,7 +1231,6 @@ override fun onServiceConnected() {
 
     return startsNearTop && tallSidePane
   }
-
 
 
   private fun tapKeyboardHideButtonAfterSend(source: String): Boolean {
@@ -1389,7 +1384,6 @@ override fun onServiceConnected() {
 
     return dispatched
   }
-
 
   private fun tapTelegramRootRelativeKeyboardDismissSequenceAfterSend(
     source: String,
@@ -3541,7 +3535,18 @@ override fun onServiceConnected() {
 
                 scheduleAutoSendAfterPaste("GPT→TG_FULL_TEXTVIEW_EXTRACT", tgEdit)
 
+                var textViewDirectSendCompleted = false
+                val textViewDirectSendExpectedPrefix = extractedText.take(20)
+
                 fun attemptTextViewExtractDirectSend(reason: String) {
+                  if (textViewDirectSendCompleted) {
+                    appendDebugLog(
+                      "GPT→TG",
+                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_SKIP_COMPLETED reason=$reason"
+                    )
+                    return
+                  }
+
                   val editRect = android.graphics.Rect()
                   try {
                     tgEdit.getBoundsInScreen(editRect)
@@ -3560,10 +3565,22 @@ override fun onServiceConnected() {
                     "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_ATTEMPT reason=$reason inputLength=${currentInputText.length} editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}"
                   )
 
-                  if (currentInputText.isBlank()) {
+                  val currentInputIsPlaceholder =
+                    currentInputText == "메시지" ||
+                    currentInputText.equals("Message", ignoreCase = true) ||
+                    currentInputText.equals("Write a message", ignoreCase = true)
+
+                  val currentInputMatchesExpected =
+                    currentInputText.contains(textViewDirectSendExpectedPrefix)
+
+                  if (
+                    currentInputText.isBlank() ||
+                    currentInputIsPlaceholder ||
+                    !currentInputMatchesExpected
+                  ) {
                     appendDebugLog(
                       "GPT→TG",
-                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_DONE reason=$reason result=skipped inputBlank=true"
+                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_DONE reason=$reason result=skipped inputReady=false inputBlank=${currentInputText.isBlank()} placeholder=$currentInputIsPlaceholder matchesExpected=$currentInputMatchesExpected expectedPrefix=${compactLogPreview(textViewDirectSendExpectedPrefix)} preview=${compactLogPreview(currentInputText)}"
                     )
                     return
                   }
@@ -3741,28 +3758,35 @@ override fun onServiceConnected() {
                     }
                   }
 
-                  if (!actionClickSuccess) {
-                    val tapX = targetSend.rect.centerX().toFloat()
-                    val tapY = targetSend.rect.centerY().toFloat()
-                    val tapPath = android.graphics.Path().apply {
-                      moveTo(tapX, tapY)
+                    var gestureDispatchedForDirectSend = false
+
+                    if (!actionClickSuccess) {
+                      val tapX = targetSend.rect.centerX().toFloat()
+                      val tapY = targetSend.rect.centerY().toFloat()
+                      val tapPath = android.graphics.Path().apply {
+                        moveTo(tapX, tapY)
+                      }
+                      val tapGesture = android.accessibilityservice.GestureDescription.Builder()
+                        .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(tapPath, 0L, 90L))
+                        .build()
+                      gestureDispatchedForDirectSend = dispatchGesture(tapGesture, null, null)
+
+                      appendDebugLog(
+                        "GPT→TG",
+                        "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_GESTURE reason=$reason dispatched=$gestureDispatchedForDirectSend label=${compactLogPreview(targetSend.label)} bounds=${targetSend.rect.left},${targetSend.rect.top},${targetSend.rect.right},${targetSend.rect.bottom} tapX=${tapX.toInt()} tapY=${tapY.toInt()}"
+                      )
                     }
-                    val tapGesture = android.accessibilityservice.GestureDescription.Builder()
-                      .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(tapPath, 0L, 90L))
-                      .build()
-                    val gestureDispatched = dispatchGesture(tapGesture, null, null)
+
+                    val directGestureSuccess = !actionClickSuccess && gestureDispatchedForDirectSend
+                    if (actionClickSuccess || directGestureSuccess) {
+                      textViewDirectSendCompleted = true
+                    }
 
                     appendDebugLog(
                       "GPT→TG",
-                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_GESTURE reason=$reason dispatched=$gestureDispatched label=${compactLogPreview(targetSend.label)} bounds=${targetSend.rect.left},${targetSend.rect.top},${targetSend.rect.right},${targetSend.rect.bottom} tapX=${tapX.toInt()} tapY=${tapY.toInt()}"
+                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_DONE reason=$reason result=attempted actionClickSuccess=$actionClickSuccess actionClickIndex=$actionClickIndex gestureSuccess=$directGestureSuccess completed=$textViewDirectSendCompleted candidateLabel=${compactLogPreview(targetSend.label)}"
                     )
                   }
-
-                  appendDebugLog(
-                    "GPT→TG",
-                    "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_DONE reason=$reason result=attempted actionClickSuccess=$actionClickSuccess actionClickIndex=$actionClickIndex candidateLabel=${compactLogPreview(targetSend.label)}"
-                  )
-                }
 
                 val directSendHandler = android.os.Handler(android.os.Looper.getMainLooper())
                 listOf(
@@ -4537,7 +4561,6 @@ override fun onServiceConnected() {
     return true
   }
 
-
   private fun getAiRootsWithRetryForTgToGpt(
     label: String,
     maxAttempts: Int = TG_TO_GPT_FIND_RETRY_COUNT,
@@ -5228,7 +5251,6 @@ override fun onServiceConnected() {
     return if (lineChanged) { dedupedLines.joinToString("\n").trim() } else { blockText }
   }
 
-
     fun requestGptToTelegram(context: Context, gptOutputMode: String, autoSend: Boolean): Boolean {
       val service = activeService
       if (service == null) {
@@ -5380,7 +5402,6 @@ override fun onServiceConnected() {
       }
       // CODE dedupe call removed in 214: restore stable CODE transfer
 
-
         if (gptOutputMode == "CODE" && textToSend.trim().length < MIN_CODE_SEND_TEXT_LENGTH) {
           service.appendDebugLog(
             "GPT→TG",
@@ -5389,7 +5410,6 @@ override fun onServiceConnected() {
           Toast.makeText(context, "코드 내용이 너무 짧아 전송하지 않았습니다.", Toast.LENGTH_SHORT).show()
           return false
         }
-
 
       
       val beforeTelegramFinalDedupeLength = textToSend.length
