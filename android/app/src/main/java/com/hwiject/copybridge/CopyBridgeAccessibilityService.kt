@@ -3113,6 +3113,24 @@ override fun onServiceConnected() {
       return false
     }
     appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE target label=${compactLogPreview(target.label)} top=${target.top} left=${target.left} isCode=${target.isCodeCopy}")
+    val fullPasteSentinel = "COPYBRIDGE_GPT_COPY_SENTINEL_${System.currentTimeMillis()}"
+
+    if (gptOutputMode == "FULL") {
+
+        copyToClipboard(fullPasteSentinel)
+
+        appendDebugLog(
+
+            "GPT→TG",
+
+            "COPY_BUTTON_FULL_SENTINEL_SET length=${fullPasteSentinel.length}"
+
+        )
+
+        android.os.SystemClock.sleep(120L)
+
+    }
+
     val clicked = if (gptOutputMode == "CODE") {
       val gestureClicked = tapNodeCenterByGesture(target.node, "CODE_COPY_BUTTON")
       appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE codeGestureClicked=$gestureClicked")
@@ -3148,12 +3166,1103 @@ override fun onServiceConnected() {
       val copiedTextBeforePaste = readClipboardText()
       val dedupedTextBeforePaste = dedupeTelegramSendTextFinal(copiedTextBeforePaste)
 
-      if (copiedTextBeforePaste.isBlank()) {
+                        if (copiedTextBeforePaste.isBlank()) {
         appendDebugLog(
           "GPT→TG",
-          "COPY_BUTTON_FULL_BLOCKED reason=blankClipboard"
+          "COPY_BUTTON_FULL_BLANK_CLIPBOARD_TRY_DIRECT_PASTE telegramEdit=true autoSend=$autoSend"
         )
-        Toast.makeText(this, "GPT 전체 복사에 실패했습니다. 전송하지 않았습니다.", Toast.LENGTH_SHORT).show()
+
+        val targetRect = android.graphics.Rect()
+        target.node.getBoundsInScreen(targetRect)
+
+        val tapAttempts = listOf(
+          Triple("center", 0, 0),
+          Triple("upper", 0, -18),
+          Triple("lower", 0, 18)
+        )
+
+        appendDebugLog(
+          "GPT→TG",
+          "COPY_BUTTON_FULL_MULTI_TAP_START attempts=${tapAttempts.size} targetBounds=${targetRect.left},${targetRect.top},${targetRect.right},${targetRect.bottom} autoSend=$autoSend"
+        )
+
+        var lastInvalidReason = "notStarted"
+        var lastPastedPreview = ""
+        var lastPastedLength = 0
+
+        tapAttempts.forEachIndexed { attemptIndex, attempt ->
+          val attemptName = attempt.first
+          val offsetX = attempt.second
+          val offsetY = attempt.third
+
+          copyToClipboard(fullPasteSentinel)
+          android.os.SystemClock.sleep(90L)
+
+          val tapX = (targetRect.centerX() + offsetX).coerceIn(targetRect.left + 4, targetRect.right - 4).toFloat()
+          val tapY = (targetRect.centerY() + offsetY).coerceIn(targetRect.top + 4, targetRect.bottom - 4).toFloat()
+
+          val tapPath = android.graphics.Path().apply {
+            moveTo(tapX, tapY)
+          }
+
+          val tapGesture = android.accessibilityservice.GestureDescription.Builder()
+            .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(tapPath, 0L, 80L))
+            .build()
+
+          val tapDispatched = dispatchGesture(tapGesture, null, null)
+
+          appendDebugLog(
+            "GPT→TG",
+            "COPY_BUTTON_FULL_MULTI_TAP_GESTURE attempt=${attemptIndex + 1} name=$attemptName dispatched=$tapDispatched tapX=${tapX.toInt()} tapY=${tapY.toInt()} sentinelLength=${fullPasteSentinel.length}"
+          )
+
+          android.os.SystemClock.sleep(420L)
+
+          val clearBeforeDirectPasteOk = try {
+            setTextToNode(tgEdit, "")
+          } catch (error: Exception) {
+            appendDebugLog(
+              "GPT→TG",
+              "COPY_BUTTON_FULL_MULTI_TAP_CLEAR_BEFORE_EXCEPTION attempt=${attemptIndex + 1} ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
+            )
+            false
+          }
+
+          appendDebugLog(
+            "GPT→TG",
+            "COPY_BUTTON_FULL_MULTI_TAP_CLEAR_BEFORE attempt=${attemptIndex + 1} result=$clearBeforeDirectPasteOk"
+          )
+
+          val directPasteOk = try {
+            tgEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            tgEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            android.os.SystemClock.sleep(180L)
+            pasteClipboardToNode(tgEdit)
+          } catch (error: Exception) {
+            appendDebugLog(
+              "GPT→TG",
+              "COPY_BUTTON_FULL_MULTI_TAP_PASTE_EXCEPTION attempt=${attemptIndex + 1} ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
+            )
+            false
+          }
+
+          var directPastedText = ""
+          if (directPasteOk) {
+            android.os.SystemClock.sleep(260L)
+            try {
+              tgEdit.refresh()
+            } catch (_: Exception) {
+            }
+            directPastedText = tgEdit.text?.toString()?.trim().orEmpty()
+          }
+
+          val directPasteContainsSentinel = directPastedText.contains(fullPasteSentinel)
+          val directPasteTooShort = directPastedText.trim().length < 20
+          val directPasteValid = directPasteOk &&
+            directPastedText.isNotBlank() &&
+            !directPasteContainsSentinel &&
+            !directPasteTooShort
+
+          lastPastedLength = directPastedText.length
+          lastPastedPreview = compactLogPreview(directPastedText)
+          lastInvalidReason = if (directPasteContainsSentinel) {
+            "sentinel"
+          } else if (directPasteTooShort) {
+            "tooShort"
+          } else if (!directPasteOk) {
+            "pasteFailed"
+          } else {
+            "blankOrUnknown"
+          }
+
+          appendDebugLog(
+            "GPT→TG",
+            "COPY_BUTTON_FULL_MULTI_TAP_VALIDATION attempt=${attemptIndex + 1} name=$attemptName pasteResult=$directPasteOk valid=$directPasteValid pastedLength=${directPastedText.length} containsSentinel=$directPasteContainsSentinel tooShort=$directPasteTooShort reason=$lastInvalidReason preview=${compactLogPreview(directPastedText)}"
+          )
+
+          if (directPasteValid) {
+            appendDebugLog(
+              "GPT→TG",
+              "COPY_BUTTON_FULL_MULTI_TAP_VALIDATED attempt=${attemptIndex + 1} name=$attemptName autoSend=$autoSend textLength=${directPastedText.length}"
+            )
+
+            if (autoSend) {
+              scheduleAutoSendAfterPaste("GPT→TG_FULL_MULTI_TAP_VALIDATED", tgEdit)
+            } else {
+              Toast.makeText(this, "Telegram 입력창에 붙여넣었습니다.", Toast.LENGTH_SHORT).show()
+            }
+            return true
+          }
+
+          val clearInvalidPasteOk = try {
+            setTextToNode(tgEdit, "")
+          } catch (error: Exception) {
+            appendDebugLog(
+              "GPT→TG",
+              "COPY_BUTTON_FULL_MULTI_TAP_CLEAR_INVALID_EXCEPTION attempt=${attemptIndex + 1} ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
+            )
+            false
+          }
+
+          appendDebugLog(
+            "GPT→TG",
+            "COPY_BUTTON_FULL_MULTI_TAP_INVALID_CLEARED attempt=${attemptIndex + 1} result=$clearInvalidPasteOk reason=$lastInvalidReason"
+          )
+        }
+
+        appendDebugLog(
+          "GPT→TG",
+          "COPY_BUTTON_FULL_MULTI_TAP_INVALID_STOP attempts=${tapAttempts.size} reason=$lastInvalidReason fallbackBlocked=true autoSendBlocked=true lastPastedLength=$lastPastedLength lastPreview=$lastPastedPreview"
+        )
+
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_TEXTVIEW_EXTRACT_START reason=multiTapInvalid aiRoots=${aiRoots.size} autoSend=$autoSend"
+        )
+
+        data class GptTextViewCandidate(
+          val text: String,
+          val rect: android.graphics.Rect,
+          val className: String,
+          val packageName: String,
+          val score: Int
+        )
+
+        val textViewCandidates = mutableListOf<GptTextViewCandidate>()
+        var textViewInspectCount = 0
+        var textViewRejectLogCount = 0
+        var textViewAcceptLogCount = 0
+
+        fun collectGptTextViewCandidates(node: AccessibilityNodeInfo) {
+          // node is non-null per signature
+
+          val rect = android.graphics.Rect()
+          try {
+            node.getBoundsInScreen(rect)
+          } catch (_: Exception) {
+          }
+
+          val label = buildNodeLabel(node).trim()
+          val className = node.className?.toString().orEmpty()
+          val packageName = node.packageName?.toString().orEmpty()
+          val lowerLabel = label.lowercase()
+
+          val isTextView = className.contains("TextView", ignoreCase = true)
+          val isGptPackage = packageName == "com.openai.chatgpt"
+          val longEnough = label.length >= 20
+          val visible = !rect.isEmpty() && rect.top >= 0
+          val notTinyButton = rect.width() >= 260 && rect.height() >= 40
+          val aboveActionRow = rect.bottom <= targetRect.top + 24
+          val notTopHeader = rect.bottom > 180
+          val notInputArea = rect.top < 930
+          val exactUiLabel =
+            label == "복사" ||
+            label == "공유" ||
+            label == "더 많은 액션" ||
+            label == "소리 내어 읽기" ||
+            label == "ChatGPT에게 답장" ||
+            label == "첨부 파일" ||
+            label == "음성 받아쓰기" ||
+            label == "음성 대화 시작" ||
+            label == "Openclaw" ||
+            label == "5.5 높음" ||
+            label == "위로 이동"
+
+          val shortUiLikeLabel = label.length <= 24 && (
+            lowerLabel.contains("chatgpt에게 답장") ||
+            lowerLabel.contains("첨부 파일") ||
+            lowerLabel.contains("음성 받아쓰기") ||
+            lowerLabel.contains("음성 대화") ||
+            lowerLabel.contains("위로 이동")
+          )
+
+          val notUiLabel = !(exactUiLabel || shortUiLikeLabel)
+
+          val looksLikeInstructionOrAnswer = label.contains(" ") ||
+            label.contains("\n") ||
+            label.contains("-") ||
+            label.contains(":") ||
+            label.contains("단계") ||
+            label.contains("문제") ||
+            label.contains("목적") ||
+            label.contains("질문") ||
+            label.contains("로그") ||
+            label.length >= 60
+
+          val rejectReasons = mutableListOf<String>()
+          if (!isTextView) rejectReasons.add("notTextView")
+          if (!isGptPackage) rejectReasons.add("notGptPackage:$packageName")
+          if (!longEnough) rejectReasons.add("tooShort:${label.length}")
+          if (!visible) rejectReasons.add("notVisible")
+          if (!notTinyButton) rejectReasons.add("tiny:${rect.width()}x${rect.height()}")
+          if (!aboveActionRow) rejectReasons.add("notAboveActionRow:${rect.bottom}>${targetRect.top + 24}")
+          if (!notTopHeader) rejectReasons.add("topHeader:${rect.bottom}")
+          if (!notInputArea) rejectReasons.add("inputArea:${rect.top}")
+          if (!notUiLabel) rejectReasons.add("uiLabel")
+          if (!looksLikeInstructionOrAnswer) rejectReasons.add("notAnswerLike")
+
+          val accepted = isTextView && isGptPackage && longEnough && visible && notTinyButton && aboveActionRow && notTopHeader && notInputArea && notUiLabel && looksLikeInstructionOrAnswer
+
+          if (isTextView && isGptPackage && label.isNotBlank()) {
+            textViewInspectCount += 1
+            if (!accepted && textViewRejectLogCount < 12) {
+              appendDebugLog(
+                "GPT→TG",
+                "GPT_TEXTVIEW_EXTRACT_REJECT[$textViewRejectLogCount] inspect=$textViewInspectCount reasons=${rejectReasons.joinToString("|")} length=${label.length} class=$className bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} preview=${compactLogPreview(label)}"
+              )
+              textViewRejectLogCount += 1
+            }
+          }
+
+          if (accepted) {
+            var score = 0
+            score += label.length.coerceAtMost(1200)
+            score += rect.width() / 4
+            score += rect.height() / 2
+            if (rect.left <= 80 && rect.right >= 760) score += 300
+            if (rect.bottom <= targetRect.top) score += 200
+            if (rect.top < targetRect.top && rect.bottom > 220) score += 120
+
+            textViewCandidates.add(
+              GptTextViewCandidate(
+                text = label,
+                rect = rect,
+                className = className,
+                packageName = packageName,
+                score = score
+              )
+            )
+            if (textViewAcceptLogCount < 8) {
+              appendDebugLog(
+                "GPT→TG",
+                "GPT_TEXTVIEW_EXTRACT_ACCEPT[$textViewAcceptLogCount] score=$score length=${label.length} class=$className bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} preview=${compactLogPreview(label)}"
+              )
+              textViewAcceptLogCount += 1
+            }
+          }
+
+          for (childIndex in 0 until node.childCount) {
+            collectGptTextViewCandidates(node.getChild(childIndex) ?: return)
+          }
+        }
+
+        aiRoots.forEach { root ->
+          collectGptTextViewCandidates(root ?: return@forEach)
+        }
+
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_TEXTVIEW_EXTRACT_CANDIDATES count=${textViewCandidates.size}"
+        )
+
+        textViewCandidates
+          .sortedWith(
+            compareByDescending<GptTextViewCandidate> { it.score }
+              .thenByDescending { it.text.length }
+          )
+          .take(8)
+          .forEachIndexed { index, candidate ->
+            appendDebugLog(
+              "GPT→TG",
+              "GPT_TEXTVIEW_EXTRACT_CANDIDATE[$index] score=${candidate.score} length=${candidate.text.length} class=${candidate.className} package=${candidate.packageName} bounds=${candidate.rect.left},${candidate.rect.top},${candidate.rect.right},${candidate.rect.bottom} preview=${compactLogPreview(candidate.text)}"
+            )
+          }
+
+        val selectedTextViewCandidate = textViewCandidates
+          .sortedWith(
+            compareByDescending<GptTextViewCandidate> { it.score }
+              .thenByDescending { it.text.length }
+          )
+          .firstOrNull()
+
+        if (selectedTextViewCandidate != null) {
+          val extractedText = selectedTextViewCandidate.text.trim()
+          val validExtractedText =
+            extractedText.length >= 20 &&
+            !extractedText.contains(fullPasteSentinel) &&
+            extractedText != "Openclaw" &&
+            extractedText != "5.5 높음"
+
+          appendDebugLog(
+            "GPT→TG",
+            "GPT_TEXTVIEW_EXTRACT_SELECTED valid=$validExtractedText score=${selectedTextViewCandidate.score} length=${extractedText.length} bounds=${selectedTextViewCandidate.rect.left},${selectedTextViewCandidate.rect.top},${selectedTextViewCandidate.rect.right},${selectedTextViewCandidate.rect.bottom} preview=${compactLogPreview(extractedText)}"
+          )
+
+          if (validExtractedText) {
+            val clearBeforeTextViewOk = try {
+              setTextToNode(tgEdit, "")
+            } catch (error: Exception) {
+              appendDebugLog(
+                "GPT→TG",
+                "GPT_TEXTVIEW_EXTRACT_CLEAR_EXCEPTION ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
+              )
+              false
+            }
+
+            appendDebugLog(
+              "GPT→TG",
+              "GPT_TEXTVIEW_EXTRACT_CLEAR_BEFORE result=$clearBeforeTextViewOk"
+            )
+
+            val setTextOk = try {
+              setTextToNode(tgEdit, extractedText)
+            } catch (error: Exception) {
+              appendDebugLog(
+                "GPT→TG",
+                "GPT_TEXTVIEW_EXTRACT_SET_EXCEPTION ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
+              )
+              false
+            }
+
+            android.os.SystemClock.sleep(220L)
+
+            var telegramInputText = ""
+            try {
+              tgEdit.refresh()
+              telegramInputText = tgEdit.text?.toString()?.trim().orEmpty()
+            } catch (_: Exception) {
+            }
+
+            val setVerified = setTextOk &&
+              telegramInputText.isNotBlank() &&
+              telegramInputText.contains(extractedText.take(20))
+
+            appendDebugLog(
+              "GPT→TG",
+              "GPT_TEXTVIEW_EXTRACT_SET_RESULT setTextOk=$setTextOk verified=$setVerified inputLength=${telegramInputText.length} autoSend=$autoSend preview=${compactLogPreview(telegramInputText)}"
+            )
+
+            if (setVerified) {
+              if (autoSend) {
+                appendDebugLog(
+                  "GPT→TG",
+                  "GPT_TEXTVIEW_EXTRACT_AUTOSEND_START inputLength=${telegramInputText.length} schedule=true directFallback=true"
+                )
+
+                scheduleAutoSendAfterPaste("GPT→TG_FULL_TEXTVIEW_EXTRACT", tgEdit)
+
+                fun attemptTextViewExtractDirectSend(reason: String) {
+                  val editRect = android.graphics.Rect()
+                  try {
+                    tgEdit.getBoundsInScreen(editRect)
+                  } catch (_: Exception) {
+                  }
+
+                  var currentInputText = ""
+                  try {
+                    tgEdit.refresh()
+                    currentInputText = tgEdit.text?.toString()?.trim().orEmpty()
+                  } catch (_: Exception) {
+                  }
+
+                  appendDebugLog(
+                    "GPT→TG",
+                    "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_ATTEMPT reason=$reason inputLength=${currentInputText.length} editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}"
+                  )
+
+                  if (currentInputText.isBlank()) {
+                    appendDebugLog(
+                      "GPT→TG",
+                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_DONE reason=$reason result=skipped inputBlank=true"
+                    )
+                    return
+                  }
+
+                  data class TelegramSendCandidate(
+                    val node: AccessibilityNodeInfo,
+                    val label: String,
+                    val rect: android.graphics.Rect,
+                    val score: Int
+                  )
+
+                  val candidates = mutableListOf<TelegramSendCandidate>()
+
+                  fun collectTelegramSendCandidates(node: AccessibilityNodeInfo) {
+                    val packageName = node.packageName?.toString().orEmpty()
+                    val label = buildNodeLabel(node).trim()
+                    val lowerLabel = label.lowercase()
+                    val rect = android.graphics.Rect()
+                    try {
+                      node.getBoundsInScreen(rect)
+                    } catch (_: Exception) {
+                    }
+
+                    val isTelegram = packageName == "org.telegram.messenger"
+                    val visible = !rect.isEmpty() && rect.top >= 0
+                    val labelLooksSend =
+                      label == "보내기" ||
+                      label == "전송" ||
+                      label.equals("Send", ignoreCase = true) ||
+                      lowerLabel == "send" ||
+                      lowerLabel.contains("send message")
+
+                    val excluded =
+                      lowerLabel.contains("음성") ||
+                      lowerLabel.contains("녹음") ||
+                      lowerLabel.contains("첨부") ||
+                      lowerLabel.contains("미디어") ||
+                      lowerLabel.contains("이모지") ||
+                      lowerLabel.contains("스티커") ||
+                      lowerLabel.contains("gif")
+
+                    val nearInputRow = if (!editRect.isEmpty()) {
+                      rect.centerY() >= editRect.top - 140 && rect.centerY() <= editRect.bottom + 160
+                    } else {
+                      rect.bottom >= 1850
+                    }
+
+                    val rightOfInput = if (!editRect.isEmpty()) {
+                      rect.centerX() >= editRect.right
+                    } else {
+                      rect.left >= 700
+                    }
+
+                    val smallButton =
+                      rect.width() in 36..190 &&
+                      rect.height() in 36..190
+
+                    val blankRightButton =
+                      label.isBlank() &&
+                      nearInputRow &&
+                      rightOfInput &&
+                      smallButton
+
+                    if (isTelegram && visible && !excluded && (labelLooksSend || blankRightButton)) {
+                      var score = 0
+                      if (labelLooksSend) score += 1000
+                      if (blankRightButton) score += 300
+                      if (nearInputRow) score += 250
+                      if (rightOfInput) score += 200
+                      if (node.isClickable) score += 120
+                      score += rect.left.coerceAtLeast(0) / 10
+
+                      candidates.add(
+                        TelegramSendCandidate(
+                          node = node,
+                          label = label,
+                          rect = rect,
+                          score = score
+                        )
+                      )
+                    }
+
+                    for (childIndex in 0 until node.childCount) {
+                      collectTelegramSendCandidates(node.getChild(childIndex) ?: return)
+                    }
+                  }
+
+                  val telegramRootsForSend = try {
+                    windows
+                      ?.mapNotNull { window ->
+                        try {
+                          window.root
+                        } catch (_: Exception) {
+                          null
+                        }
+                      }
+                      ?.filter { root ->
+                        root.packageName?.toString() == "org.telegram.messenger"
+                      }
+                      ?: emptyList()
+                  } catch (_: Exception) {
+                    emptyList()
+                  }
+
+                  telegramRootsForSend.forEach { root ->
+                    collectTelegramSendCandidates(root)
+                  }
+
+                  val sortedCandidates = candidates.sortedWith(
+                    compareByDescending<TelegramSendCandidate> { it.score }
+                      .thenByDescending { it.rect.left }
+                  )
+
+                  appendDebugLog(
+                    "GPT→TG",
+                    "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_CANDIDATES reason=$reason count=${sortedCandidates.size} telegramRoots=${telegramRootsForSend.size}"
+                  )
+
+                  sortedCandidates.take(8).forEachIndexed { index, candidate ->
+                    appendDebugLog(
+                      "GPT→TG",
+                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_CANDIDATE[$index] reason=$reason score=${candidate.score} label=${compactLogPreview(candidate.label)} class=${candidate.node.className} clickable=${candidate.node.isClickable} bounds=${candidate.rect.left},${candidate.rect.top},${candidate.rect.right},${candidate.rect.bottom}"
+                    )
+                  }
+
+                  val targetSend = sortedCandidates.firstOrNull()
+                  if (targetSend == null) {
+                    appendDebugLog(
+                      "GPT→TG",
+                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_DONE reason=$reason result=noCandidate"
+                    )
+                    return
+                  }
+
+                  val clickChain = mutableListOf<AccessibilityNodeInfo>()
+                  var chainNode: AccessibilityNodeInfo? = targetSend.node
+                  while (chainNode != null && clickChain.size < 5) {
+                    clickChain.add(chainNode)
+                    chainNode = try {
+                      chainNode.parent
+                    } catch (_: Exception) {
+                      null
+                    }
+                  }
+
+                  var actionClickSuccess = false
+                  var actionClickIndex = -1
+
+                  for ((index, node) in clickChain.withIndex()) {
+                    val nodeRect = android.graphics.Rect()
+                    try {
+                      node.getBoundsInScreen(nodeRect)
+                    } catch (_: Exception) {
+                    }
+
+                    val clickResult = try {
+                      node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    } catch (error: Exception) {
+                      appendDebugLog(
+                        "GPT→TG",
+                        "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_ACTION_CLICK_EXCEPTION reason=$reason index=$index ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
+                      )
+                      false
+                    }
+
+                    appendDebugLog(
+                      "GPT→TG",
+                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_ACTION_CLICK reason=$reason index=$index result=$clickResult label=${compactLogPreview(buildNodeLabel(node))} class=${node.className} clickable=${node.isClickable} bounds=${nodeRect.left},${nodeRect.top},${nodeRect.right},${nodeRect.bottom}"
+                    )
+
+                    if (clickResult) {
+                      actionClickSuccess = true
+                      actionClickIndex = index
+                      break
+                    }
+                  }
+
+                  if (!actionClickSuccess) {
+                    val tapX = targetSend.rect.centerX().toFloat()
+                    val tapY = targetSend.rect.centerY().toFloat()
+                    val tapPath = android.graphics.Path().apply {
+                      moveTo(tapX, tapY)
+                    }
+                    val tapGesture = android.accessibilityservice.GestureDescription.Builder()
+                      .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(tapPath, 0L, 90L))
+                      .build()
+                    val gestureDispatched = dispatchGesture(tapGesture, null, null)
+
+                    appendDebugLog(
+                      "GPT→TG",
+                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_GESTURE reason=$reason dispatched=$gestureDispatched label=${compactLogPreview(targetSend.label)} bounds=${targetSend.rect.left},${targetSend.rect.top},${targetSend.rect.right},${targetSend.rect.bottom} tapX=${tapX.toInt()} tapY=${tapY.toInt()}"
+                    )
+                  }
+
+                  appendDebugLog(
+                    "GPT→TG",
+                    "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_DONE reason=$reason result=attempted actionClickSuccess=$actionClickSuccess actionClickIndex=$actionClickIndex candidateLabel=${compactLogPreview(targetSend.label)}"
+                  )
+                }
+
+                val directSendHandler = android.os.Handler(android.os.Looper.getMainLooper())
+                listOf(
+                  450L to "textview_direct_450",
+                  1100L to "textview_direct_1100",
+                  1800L to "textview_direct_1800"
+                ).forEach { pair ->
+                  directSendHandler.postDelayed({
+                    attemptTextViewExtractDirectSend(pair.second)
+                  }, pair.first)
+                }
+              } else {
+                Toast.makeText(this, "Telegram 입력창에 GPT 화면 텍스트를 넣었습니다.", Toast.LENGTH_SHORT).show()
+              }
+              return true
+            }
+
+            val clearFailedSetOk = try {
+              setTextToNode(tgEdit, "")
+            } catch (_: Exception) {
+              false
+            }
+
+            appendDebugLog(
+              "GPT→TG",
+              "GPT_TEXTVIEW_EXTRACT_SET_FAILED cleared=$clearFailedSetOk fallbackBlocked=true autoSendBlocked=true"
+            )
+
+            Toast.makeText(
+              this,
+              "GPT 화면 텍스트 입력 검증에 실패했습니다.",
+              Toast.LENGTH_SHORT
+            ).show()
+            return true
+          }
+        }
+
+        val clearNoCandidateOk = try {
+          setTextToNode(tgEdit, "")
+        } catch (_: Exception) {
+          false
+        }
+
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_TEXTVIEW_EXTRACT_INVALID_STOP reason=noValidCandidate candidates=${textViewCandidates.size} cleared=$clearNoCandidateOk fallbackBlocked=true autoSendBlocked=true"
+        )
+
+        Toast.makeText(
+          this,
+          "GPT 화면 텍스트 후보를 찾지 못했습니다.",
+          Toast.LENGTH_SHORT
+        ).show()
+        return true
+
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_SHARE_DIAG_START reason=multiTapInvalid aiRoots=${aiRoots.size} autoSendBlocked=true"
+        )
+
+        val shareCandidates = mutableListOf<AccessibilityNodeInfo>()
+
+        fun collectShareCandidates(node: AccessibilityNodeInfo) {
+          // node is non-null per signature
+          val label = buildNodeLabel(node).trim()
+          val exactShareLabel = label == "공유" || label.equals("Share", ignoreCase = true)
+          if (exactShareLabel) {
+            val candidateRect = android.graphics.Rect()
+            try {
+              node.getBoundsInScreen(candidateRect)
+            } catch (_: Exception) {
+            }
+            val targetCenterY = targetRect.centerY()
+            val candidateWidth = candidateRect.width()
+            val candidateHeight = candidateRect.height()
+            val sameActionRow = kotlin.math.abs(candidateRect.centerY() - targetCenterY) <= 120
+            val rightOfCopyButton = candidateRect.left > targetRect.right
+            val smallButton = candidateWidth in 20..180 && candidateHeight in 20..180
+            val visible = !candidateRect.isEmpty() && candidateRect.top >= 0
+            appendDebugLog(
+              "GPT→TG",
+              "GPT_SHARE_DIAG_FILTER exactLabelOnly=true label=${compactLogPreview(label)} class=${node.className} visible=$visible sameActionRow=$sameActionRow rightOfCopyButton=$rightOfCopyButton smallButton=$smallButton bounds=${candidateRect.left},${candidateRect.top},${candidateRect.right},${candidateRect.bottom}"
+            )
+            if (visible && sameActionRow && rightOfCopyButton && smallButton) {
+              shareCandidates.add(node)
+            }
+          }
+          for (childIndex in 0 until node.childCount) {
+            collectShareCandidates(node.getChild(childIndex) ?: return)
+          }
+        }
+
+        aiRoots.forEach { root ->
+          collectShareCandidates(root ?: return@forEach)
+        }
+
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_SHARE_DIAG_CANDIDATES count=${shareCandidates.size}"
+        )
+
+        shareCandidates.take(8).forEachIndexed { index, candidate ->
+          val shareRect = android.graphics.Rect()
+          try {
+            candidate.getBoundsInScreen(shareRect)
+          } catch (_: Exception) {
+          }
+          appendDebugLog(
+            "GPT→TG",
+            "GPT_SHARE_DIAG_CANDIDATE[$index] label=${compactLogPreview(buildNodeLabel(candidate))} class=${candidate.className} clickable=${candidate.isClickable} bounds=${shareRect.left},${shareRect.top},${shareRect.right},${shareRect.bottom}"
+          )
+        }
+
+        val shareTarget = shareCandidates
+          .filter { candidate ->
+            val rect = android.graphics.Rect()
+            try {
+              candidate.getBoundsInScreen(rect)
+            } catch (_: Exception) {
+            }
+            val label = buildNodeLabel(candidate).trim()
+            val exactShareLabel = label == "공유" || label.equals("Share", ignoreCase = true)
+            val sameActionRow = kotlin.math.abs(rect.centerY() - targetRect.centerY()) <= 120
+            val rightOfCopyButton = rect.left > targetRect.right
+            val smallButton = rect.width() in 20..180 && rect.height() in 20..180
+            exactShareLabel && !rect.isEmpty() && sameActionRow && rightOfCopyButton && smallButton
+          }
+          .minWithOrNull(
+            compareBy<AccessibilityNodeInfo> { candidate ->
+              val rect = android.graphics.Rect()
+              candidate.getBoundsInScreen(rect)
+              kotlin.math.abs(rect.centerY() - targetRect.centerY())
+            }.thenBy { candidate ->
+              val rect = android.graphics.Rect()
+              candidate.getBoundsInScreen(rect)
+              rect.left
+            }
+          )
+
+        if (shareTarget == null) {
+          appendDebugLog(
+            "GPT→TG",
+            "GPT_SHARE_DIAG_SKIPPED reason=noShareTarget fallbackBlocked=true autoSendBlocked=true"
+          )
+          Toast.makeText(
+            this,
+            "GPT 복사 실패: 공유 버튼도 찾지 못했습니다.",
+            Toast.LENGTH_SHORT
+          ).show()
+          return true
+        }
+
+        val shareRect = android.graphics.Rect()
+        shareTarget!!.getBoundsInScreen(shareRect)
+        val shareChain = mutableListOf<AccessibilityNodeInfo>()
+        var chainNode: AccessibilityNodeInfo? = shareTarget
+        while (chainNode != null && shareChain.size < 7) {
+          shareChain.add(chainNode)
+          chainNode = try {
+            chainNode.parent
+          } catch (_: Exception) {
+            null
+          }
+        }
+
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_SHARE_DIAG_PARENT_CHAIN count=${shareChain.size}"
+        )
+
+        shareChain.forEachIndexed { chainIndex, node ->
+          val nodeRect = android.graphics.Rect()
+          try {
+            node.getBoundsInScreen(nodeRect)
+          } catch (_: Exception) {
+          }
+
+          appendDebugLog(
+            "GPT→TG",
+            "GPT_SHARE_DIAG_PARENT[$chainIndex] label=${compactLogPreview(buildNodeLabel(node))} class=${node.className} clickable=${node.isClickable} enabled=${node.isEnabled} bounds=${nodeRect.left},${nodeRect.top},${nodeRect.right},${nodeRect.bottom} childCount=${node.childCount}"
+          )
+        }
+
+        var actionClickSucceeded = false
+        var actionClickIndex = -1
+        var actionClickLabel = ""
+
+        for ((chainIndex, node) in shareChain.withIndex()) {
+          val nodeRect = android.graphics.Rect()
+          try {
+            node.getBoundsInScreen(nodeRect)
+          } catch (_: Exception) {
+          }
+
+          val clickResult = try {
+            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+          } catch (error: Exception) {
+            appendDebugLog(
+              "GPT→TG",
+              "GPT_SHARE_DIAG_ACTION_CLICK_EXCEPTION index=$chainIndex ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
+            )
+            false
+          }
+
+          appendDebugLog(
+            "GPT→TG",
+            "GPT_SHARE_DIAG_ACTION_CLICK index=$chainIndex result=$clickResult label=${compactLogPreview(buildNodeLabel(node))} class=${node.className} clickable=${node.isClickable} enabled=${node.isEnabled} bounds=${nodeRect.left},${nodeRect.top},${nodeRect.right},${nodeRect.bottom}"
+          )
+
+          if (clickResult) {
+            actionClickSucceeded = true
+            actionClickIndex = chainIndex
+            actionClickLabel = compactLogPreview(buildNodeLabel(node))
+            break
+          }
+        }
+
+        fun detectShareSheetSnapshot(phase: String): Boolean {
+          val phaseWindows = try {
+            windows ?: emptyList()
+          } catch (_: Exception) {
+            emptyList()
+          }
+          val phaseChooserPackageHits = phaseWindows.mapNotNull { window ->
+            val root = try {
+              window.root
+            } catch (_: Exception) {
+              null
+            }
+            root?.packageName?.toString()
+          }.filter { packageName ->
+            val lowerPackage = packageName.lowercase()
+            lowerPackage.contains("intentresolver") ||
+            lowerPackage.contains("chooser") ||
+            lowerPackage.contains("resolver")
+          }.distinct()
+          val phaseTextNodes = mutableListOf<AccessibilityNodeInfo>()
+          fun collectPhaseTextNodes(node: AccessibilityNodeInfo) {
+            // node is non-null per signature
+            if (phaseTextNodes.size >= 60) return
+            val rect = android.graphics.Rect()
+            try {
+              node.getBoundsInScreen(rect)
+            } catch (_: Exception) {
+            }
+            val label = buildNodeLabel(node).trim()
+            if (label.isNotBlank() && !rect.isEmpty()) {
+              phaseTextNodes.add(node)
+            }
+            for (childIndex in 0 until node.childCount) {
+              collectPhaseTextNodes(node.getChild(childIndex) ?: return)
+            }
+          }
+          phaseWindows.forEach { window ->
+            val root = try {
+              window.root
+            } catch (_: Exception) {
+              null
+            }
+            collectPhaseTextNodes(root!!)
+          }
+          val phaseTextHits = phaseTextNodes.map { node ->
+            buildNodeLabel(node).trim()
+          }.filter { label ->
+            val lowerLabel = label.lowercase()
+            label.contains("공유 대상") ||
+            label.contains("공유 위치") ||
+            label.contains("앱 선택") ||
+            label.contains("공유할") ||
+            (label.contains("공유") && label.length <= 12) ||
+            lowerLabel == "share" ||
+            lowerLabel.contains("choose an app") ||
+            lowerLabel.contains("share with") ||
+            lowerLabel.contains("complete action using") ||
+            lowerLabel.contains("nearby share")
+          }.take(12)
+
+          val detected = phaseChooserPackageHits.isNotEmpty() || phaseTextHits.isNotEmpty()
+
+          appendDebugLog(
+            "GPT→TG",
+            "GPT_SHARE_DIAG_$phase detected=$detected windows=${phaseWindows.size} chooserPackageHits=${phaseChooserPackageHits.size} textHits=${phaseTextHits.size} packages=${compactLogPreview(phaseChooserPackageHits.joinToString("|"))} texts=${compactLogPreview(phaseTextHits.joinToString("|"))}"
+          )
+          return detected
+        }
+
+        fun dispatchCenterGestureForNode(
+          phase: String,
+          node: AccessibilityNodeInfo,
+          fallbackLabel: String
+        ): Boolean {
+          val rect = android.graphics.Rect()
+          try {
+            node.getBoundsInScreen(rect)
+          } catch (_: Exception) {
+          }
+          if (rect.isEmpty()) {
+            appendDebugLog(
+              "GPT→TG",
+              "GPT_SHARE_DIAG_${phase}_GESTURE skipped=true reason=emptyBounds label=${compactLogPreview(fallbackLabel)}"
+            )
+            return false
+          }
+          val tapX = rect.centerX().toFloat()
+          val tapY = rect.centerY().toFloat()
+          val tapPath = android.graphics.Path().apply {
+            moveTo(tapX, tapY)
+          }
+          val tapGesture = android.accessibilityservice.GestureDescription.Builder()
+            .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(tapPath, 0L, 90L))
+            .build()
+          val dispatched = dispatchGesture(tapGesture, null, null)
+
+          appendDebugLog(
+            "GPT→TG",
+            "GPT_SHARE_DIAG_${phase}_GESTURE dispatched=$dispatched label=${compactLogPreview(fallbackLabel)} class=${node.className} clickable=${node.isClickable} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} tapX=${tapX.toInt()} tapY=${tapY.toInt()}"
+          )
+          return dispatched
+        }
+
+        var shareSheetDetectedAfterAttempts = false
+
+        if (actionClickSucceeded) {
+          appendDebugLog(
+            "GPT→TG",
+            "GPT_SHARE_DIAG_ACTION_CLICK_SELECTED index=$actionClickIndex label=$actionClickLabel"
+          )
+          android.os.SystemClock.sleep(900L)
+          shareSheetDetectedAfterAttempts = detectShareSheetSnapshot("AFTER_ACTION_CLICK")
+        } else {
+          appendDebugLog(
+            "GPT→TG",
+            "GPT_SHARE_DIAG_ACTION_CLICK_SELECTED none=true"
+          )
+          shareSheetDetectedAfterAttempts = detectShareSheetSnapshot("AFTER_ACTION_CLICK")
+        }
+
+        if (!shareSheetDetectedAfterAttempts) {
+          dispatchCenterGestureForNode(
+            "TARGET",
+            shareTarget,
+            buildNodeLabel(shareTarget!!)
+          )
+          android.os.SystemClock.sleep(900L)
+          shareSheetDetectedAfterAttempts = detectShareSheetSnapshot("AFTER_TARGET_GESTURE")
+        }
+
+        if (!shareSheetDetectedAfterAttempts) {
+          val clickableParent = if (actionClickIndex >= 0 && actionClickIndex < shareChain.size) {
+            shareChain[actionClickIndex]
+          } else {
+            shareChain.firstOrNull { node ->
+              try {
+                node.isClickable && node.isEnabled
+              } catch (_: Exception) {
+                false
+              }
+            }
+          }
+          if (clickableParent == null) {
+            appendDebugLog(
+              "GPT→TG",
+              "GPT_SHARE_DIAG_PARENT_GESTURE skipped=true reason=noClickableParent"
+            )
+          } else {
+            dispatchCenterGestureForNode(
+              "PARENT",
+              clickableParent,
+              buildNodeLabel(clickableParent)
+            )
+            android.os.SystemClock.sleep(900L)
+            shareSheetDetectedAfterAttempts = detectShareSheetSnapshot("AFTER_PARENT_GESTURE")
+          }
+        }
+
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_SHARE_DIAG_ATTEMPTS_DONE detected=$shareSheetDetectedAfterAttempts actionClickSucceeded=$actionClickSucceeded actionClickIndex=$actionClickIndex"
+        )
+
+        val windowList = try {
+          windows ?: emptyList()
+        } catch (_: Exception) {
+          emptyList()
+        }
+
+        val chooserPackageHits = windowList.mapNotNull { window ->
+          val root = try {
+            window.root
+          } catch (_: Exception) {
+            null
+          }
+          root?.packageName?.toString()
+        }.filter { packageName ->
+          val lowerPackage = packageName.lowercase()
+          lowerPackage.contains("intentresolver") ||
+          lowerPackage.contains("chooser") ||
+          lowerPackage.contains("resolver")
+        }.distinct()
+
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_SHARE_DIAG_WINDOWS count=${windowList.size} chooserPackageHits=${chooserPackageHits.size} packages=${compactLogPreview(chooserPackageHits.joinToString("|"))}"
+        )
+
+        windowList.take(8).forEachIndexed { windowIndex, window ->
+          val root = try {
+            window.root
+          } catch (_: Exception) {
+            null
+          }
+          if (root == null) {
+            appendDebugLog(
+              "GPT→TG",
+              "GPT_SHARE_DIAG_WINDOW[$windowIndex] root=null type=${window.type}"
+            )
+          } else {
+            val rootRect = android.graphics.Rect()
+            try {
+              root.getBoundsInScreen(rootRect)
+            } catch (_: Exception) {
+            }
+            appendDebugLog(
+              "GPT→TG",
+              "GPT_SHARE_DIAG_WINDOW[$windowIndex] type=${window.type} package=${root.packageName} class=${root.className} bounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} childCount=${root.childCount}"
+            )
+          }
+        }
+
+        val shareSheetTextNodes = mutableListOf<AccessibilityNodeInfo>()
+
+        fun collectShareSheetTextNodes(node: AccessibilityNodeInfo) {
+          // node is non-null per signature
+          if (shareSheetTextNodes.size >= 40) return
+          val rect = android.graphics.Rect()
+          try {
+            node.getBoundsInScreen(rect)
+          } catch (_: Exception) {
+          }
+          val label = buildNodeLabel(node).trim()
+          if (label.isNotBlank() && !rect.isEmpty()) {
+            shareSheetTextNodes.add(node)
+          }
+          for (childIndex in 0 until node.childCount) {
+            collectShareSheetTextNodes(node.getChild(childIndex) ?: return)
+          }
+        }
+
+        windowList.forEach { window ->
+          val root = try {
+            window.root
+          } catch (_: Exception) {
+            null
+          }
+          collectShareSheetTextNodes(root!!)
+        }
+
+        val shareSheetTextHits = shareSheetTextNodes.map { node ->
+          buildNodeLabel(node).trim()
+        }.filter { label ->
+          val lowerLabel = label.lowercase()
+          label.contains("공유 대상") ||
+          label.contains("공유 위치") ||
+          label.contains("앱 선택") ||
+          label.contains("공유할") ||
+          lowerLabel == "share" ||
+          lowerLabel.contains("choose an app") ||
+          lowerLabel.contains("share with") ||
+          lowerLabel.contains("complete action using")
+        }.take(12)
+
+        val shareSheetDetected = chooserPackageHits.isNotEmpty() || shareSheetTextHits.isNotEmpty()
+
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_SHARE_DIAG_TEXT_NODES count=${shareSheetTextNodes.size}"
+        )
+
+        appendDebugLog(
+          "GPT→TG",
+          "GPT_SHARE_DIAG_SHEET_DETECTED_FINAL detected=$shareSheetDetected chooserPackageHits=${chooserPackageHits.size} textHits=${shareSheetTextHits.size} texts=${compactLogPreview(shareSheetTextHits.joinToString("|"))}"
+        )
+
+        shareSheetTextNodes.take(24).forEachIndexed { index, node ->
+          val rect = android.graphics.Rect()
+          try {
+            node.getBoundsInScreen(rect)
+          } catch (_: Exception) {
+          }
+          appendDebugLog(
+            "GPT→TG",
+            "GPT_SHARE_DIAG_TEXT[$index] label=${compactLogPreview(buildNodeLabel(node))} package=${node.packageName} class=${node.className} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+          )
+        }
+
+        Toast.makeText(
+          this,
+          "공유 버튼 진단을 실행했습니다.공유창이 뜨면 뒤로 닫아주세요.",
+          Toast.LENGTH_SHORT
+        ).show()
         return true
       }
 

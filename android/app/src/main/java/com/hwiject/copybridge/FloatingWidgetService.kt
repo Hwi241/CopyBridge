@@ -46,7 +46,7 @@ class FloatingWidgetService : Service() {
   private var widgetSize = WidgetSize.SMALL
   private var autoSendEnabled = false
   private var replyCopyModeString: String = "FULL"
-  private var gptOutputModeString: String = "CODE"
+  private var gptOutputModeString: String = "FULL"
   private var isCollapsed = false
   private var widgetOpacity = 1f
   private var collapsedOpacity = 0.85f
@@ -142,9 +142,9 @@ class FloatingWidgetService : Service() {
     widgetSize = WidgetSize.entries.firstOrNull { it.label == savedSizeLabel } ?: WidgetSize.SMALL
     autoSendEnabled = prefs.getBoolean(KEY_AUTO_SEND_ENABLED, false)
     replyCopyModeString = prefs.getString(KEY_REPLY_COPY_MODE, "FULL") ?: "FULL"
-    gptOutputModeString = "CODE"
-    if (prefs.getString(KEY_GPT_OUTPUT_MODE, "CODE") != "CODE") {
-      prefs.edit().putString(KEY_GPT_OUTPUT_MODE, "CODE").apply()
+    gptOutputModeString = when (prefs.getString(KEY_GPT_OUTPUT_MODE, "FULL")) {
+      "CODE" -> "CODE"
+      else -> "FULL"
     }
     isCollapsed = prefs.getBoolean(KEY_WIDGET_COLLAPSED, false)
     widgetOpacity = clampWidgetOpacity(prefs.getFloat(KEY_WIDGET_OPACITY, OPACITY_DEFAULT_WIDGET))
@@ -157,7 +157,7 @@ class FloatingWidgetService : Service() {
       .putString(KEY_WIDGET_SIZE, widgetSize.label)
       .putBoolean(KEY_AUTO_SEND_ENABLED, autoSendEnabled)
       .putString(KEY_REPLY_COPY_MODE, replyCopyModeString)
-      .putString(KEY_GPT_OUTPUT_MODE, "CODE")
+      .putString(KEY_GPT_OUTPUT_MODE, gptOutputModeString)
       .putBoolean(KEY_WIDGET_COLLAPSED, isCollapsed)
       .putFloat(KEY_WIDGET_OPACITY, clampWidgetOpacity(widgetOpacity))
       .putFloat(KEY_COLLAPSED_OPACITY, clampWidgetOpacity(collapsedOpacity))
@@ -440,11 +440,15 @@ class FloatingWidgetService : Service() {
       saveWidgetPreferences(); refreshWidgetAtSamePosition()
     }
 
-    val gptOutputLabel = "GPT: 코드"
+    val gptOutputLabel = if (gptOutputModeString == "CODE") "GPT: 코드" else "GPT: 전체"
     val gptOutputButton = createDarkButton(gptOutputLabel, size.buttonTextSize) {
-      gptOutputModeString = "CODE"
+      gptOutputModeString = if (gptOutputModeString == "CODE") "FULL" else "CODE"
       saveWidgetPreferences()
-      Toast.makeText(this, "GPT 전체 모드는 비활성화되었습니다. 코드 모드로 전송합니다.", Toast.LENGTH_SHORT).show()
+      Toast.makeText(
+        this,
+        if (gptOutputModeString == "CODE") "GPT 코드 모드로 전송합니다." else "GPT 전체 모드로 전송합니다.",
+        Toast.LENGTH_SHORT
+      ).show()
       refreshWidgetAtSamePosition()
     }
 
@@ -480,10 +484,8 @@ class FloatingWidgetService : Service() {
     updateApiBalanceBoxText()
 
     val tgButton = createTelegramBlueButton("텔레그램으로 보내기", size.buttonTextSize) {
-      gptOutputModeString = "CODE"
-      saveWidgetPreferences()
-      appendDebugLog("WIDGET", "tap 텔레그램으로 보내기 gptMode=CODE autoSend=$autoSendEnabled")
-      CopyBridgeAccessibilityService.requestGptToTelegram(this, "CODE", autoSendEnabled)
+      appendDebugLog("WIDGET", "tap 텔레그램으로 보내기 gptMode=$gptOutputModeString autoSend=$autoSendEnabled")
+      CopyBridgeAccessibilityService.requestGptToTelegram(this, gptOutputModeString, autoSendEnabled)
     }
 
     panel.addView(header, LinearLayout.LayoutParams(size.contentWidth, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 10 })
@@ -565,10 +567,8 @@ class FloatingWidgetService : Service() {
     }
 
     val tgButton = createTelegramBlueButton("T", 22f) {
-      gptOutputModeString = "CODE"
-      saveWidgetPreferences()
-      appendDebugLog("WIDGET", "tap SS T gptMode=CODE autoSend=$autoSendEnabled")
-      CopyBridgeAccessibilityService.requestGptToTelegram(this, "CODE", autoSendEnabled)
+      appendDebugLog("WIDGET", "tap SS T gptMode=$gptOutputModeString autoSend=$autoSendEnabled")
+      CopyBridgeAccessibilityService.requestGptToTelegram(this, gptOutputModeString, autoSendEnabled)
     }
 
     panel.addView(
