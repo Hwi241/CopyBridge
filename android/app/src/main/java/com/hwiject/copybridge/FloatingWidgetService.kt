@@ -630,9 +630,9 @@ class FloatingWidgetService : Service() {
     true
    }
    CopyBridgeKeyboardShortcutBridge.ACTION_GPT_TO_TELEGRAM -> {
-    gptOutputModeString = "CODE"
-    appendDebugLog("SHORTCUT", "hardware Ctrl+Shift+Enter -> 텔레그램으로 보내기 gptMode=CODE autoSend=$autoSendEnabled")
-    CopyBridgeAccessibilityService.requestGptToTelegram(this, "CODE", autoSendEnabled)
+    val shortcutGptMode = if (gptOutputModeString == "CODE") "CODE" else "FULL"
+    appendDebugLog("SHORTCUT", "hardware Ctrl+Shift+Enter -> 텔레그램으로 보내기 gptMode=$shortcutGptMode autoSend=$autoSendEnabled")
+    CopyBridgeAccessibilityService.requestGptToTelegram(this, shortcutGptMode, autoSendEnabled)
     true
    }
    else -> false
