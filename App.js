@@ -64,6 +64,7 @@ export default function App() {
   const [deepSeekBalanceStatus, setDeepSeekBalanceStatus] = useState('$KEY');
   const [apiUsageHourOffset, setApiUsageHourOffset] = useState(0);
   const [apiUsageRecords, setApiUsageRecords] = useState([]);
+  const [youtubeAutoSkipEnabled, setYoutubeAutoSkipEnabled] = useState(true);
 
   const getNativeModule = () => NativeModules.CopyBridgeNativeModule;
 
@@ -84,6 +85,48 @@ export default function App() {
       setDebugLogs('\ub85c\uadf8\ub97c \ubd88\ub7ec\uc624\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.');
     }
   }, []);
+
+  const loadYouTubeAutoSkipSetting = useCallback(async () => {
+    const nativeModule = getNativeModule();
+    if (
+      Platform.OS !== 'android' ||
+      !nativeModule ||
+      typeof nativeModule.getYouTubeAutoSkipEnabled !== 'function'
+    ) {
+      return;
+    }
+
+    try {
+      const enabled = await nativeModule.getYouTubeAutoSkipEnabled();
+      setYoutubeAutoSkipEnabled(enabled !== false);
+    } catch (error) {}
+  }, []);
+
+  const toggleYouTubeAutoSkip = async () => {
+    const nativeModule = getNativeModule();
+    if (
+      Platform.OS !== 'android' ||
+      !nativeModule ||
+      typeof nativeModule.setYouTubeAutoSkipEnabled !== 'function'
+    ) {
+      Alert.alert(
+        'Android 전용 기능',
+        'YouTube 광고 자동 건너뛰기는 Android APK에서 사용할 수 있습니다.'
+      );
+      return;
+    }
+
+    const next = !youtubeAutoSkipEnabled;
+    try {
+      const saved = await nativeModule.setYouTubeAutoSkipEnabled(next);
+      setYoutubeAutoSkipEnabled(saved === true);
+    } catch (error) {
+      Alert.alert(
+        '설정 실패',
+        'YouTube 광고 자동 건너뛰기 설정을 저장하지 못했습니다.'
+      );
+    }
+  };
 
     const loadOpacitySettings = useCallback(async () => {
     const nativeModule = getNativeModule();
@@ -491,7 +534,8 @@ const loadKeyboardShortcutSettings = useCallback(async () => {
     loadKeyboardShortcutSettings();
     loadDeepSeekSettings();
     loadApiUsageRecords();
-  }, [loadDebugLogs, loadOpacitySettings, loadKeyboardShortcutSettings, loadDeepSeekSettings, loadApiUsageRecords]);
+    loadYouTubeAutoSkipSetting();
+  }, [loadDebugLogs, loadOpacitySettings, loadKeyboardShortcutSettings, loadDeepSeekSettings, loadApiUsageRecords, loadYouTubeAutoSkipSetting]);
 
   useEffect(() => {
     if (!keyboardShortcutCaptureAction) return undefined;
@@ -752,6 +796,23 @@ const loadKeyboardShortcutSettings = useCallback(async () => {
           </TouchableOpacity>
 
           
+        </View>
+
+        <View style={styles.youtubeAutoSkipCard}>
+          <Text style={styles.sectionTitle}>YouTube 광고 자동 건너뛰기</Text>
+          <Text style={styles.youtubeAutoSkipDescription}>
+            건너뛰기 버튼이 실제로 나타난 광고만 자동으로 누릅니다.{`\n`}
+            지속적으로 화면을 감시하지 않고 YouTube 화면 변경 이벤트가 있을 때만 확인합니다.
+          </Text>
+          <TouchableOpacity
+            style={youtubeAutoSkipEnabled ? styles.primaryButton : styles.secondaryButton}
+            activeOpacity={0.8}
+            onPress={toggleYouTubeAutoSkip}
+          >
+            <Text style={youtubeAutoSkipEnabled ? styles.primaryButtonText : styles.secondaryButtonText}>
+              {youtubeAutoSkipEnabled ? '켜짐' : '꺼짐'}
+            </Text>
+          </TouchableOpacity>
         </View>
 
         <View style={styles.deepSeekCard}>
@@ -1219,6 +1280,24 @@ const styles = StyleSheet.create({
     shadowRadius: 18,
     shadowOffset: { width: 0, height: 8 },
     elevation: 3,
+  },
+  youtubeAutoSkipCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 18,
+    marginBottom: 18,
+    shadowColor: '#000000',
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 3,
+  },
+  youtubeAutoSkipDescription: {
+    marginTop: -8,
+    marginBottom: 16,
+    fontSize: 13,
+    lineHeight: 19,
+    color: '#817A70',
   },
   deepSeekDescription: {
     marginTop: -8,

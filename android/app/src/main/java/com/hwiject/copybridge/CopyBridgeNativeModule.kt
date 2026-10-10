@@ -236,6 +236,38 @@ class CopyBridgeNativeModule(
   }
 
   @ReactMethod
+  fun getYouTubeAutoSkipEnabled(promise: Promise) {
+    try {
+      val prefs = reactContext.getSharedPreferences(
+        "copybridge_youtube_settings",
+        Context.MODE_PRIVATE
+      )
+      promise.resolve(prefs.getBoolean("auto_skip_enabled", true))
+    } catch (error: Exception) {
+      promise.reject("GET_YOUTUBE_AUTO_SKIP_FAILED", error)
+    }
+  }
+
+  @ReactMethod
+  fun setYouTubeAutoSkipEnabled(
+    enabled: Boolean,
+    promise: Promise
+  ) {
+    try {
+      val prefs = reactContext.getSharedPreferences(
+        "copybridge_youtube_settings",
+        Context.MODE_PRIVATE
+      )
+      prefs.edit()
+        .putBoolean("auto_skip_enabled", enabled)
+        .apply()
+      promise.resolve(enabled)
+    } catch (error: Exception) {
+      promise.reject("SET_YOUTUBE_AUTO_SKIP_FAILED", error)
+    }
+  }
+
+  @ReactMethod
   fun getDebugLogs(promise: Promise) {
     try {
       val prefs = reactContext.getSharedPreferences("copybridge_debug_logs", Context.MODE_PRIVATE)

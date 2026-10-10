@@ -42,6 +42,9 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   }
 
   private var lastPackageName: String? = null
+  private var lastYouTubeSkipSourceScanAtMs = 0L
+  private var lastYouTubeSkipFullScanAtMs = 0L
+  private var lastYouTubeSkipClickAtMs = 0L
   private var pendingGptToTelegram: PendingGptToTelegramRequest? = null
   private var pendingGptIdleChecks = 0
   private val pendingGptToTelegramHandler = Handler(Looper.getMainLooper())
@@ -838,6 +841,177 @@ override fun onServiceConnected() {
     if (!packageName.isNullOrBlank()) {
       lastPackageName = packageName
     }
+
+    val safeEvent = event ?: return
+    if (packageName != YOUTUBE_PACKAGE_NAME) {
+      return
+    }
+
+    handleYouTubeAutoSkipEvent(safeEvent)
+  }
+
+  private fun isYouTubeAutoSkipEnabled(): Boolean {
+    return getSharedPreferences(
+      YOUTUBE_AUTO_SKIP_PREFS,
+      MODE_PRIVATE
+    ).getBoolean(
+      YOUTUBE_AUTO_SKIP_KEY,
+      true
+    )
+  }
+
+  private fun normalizeYouTubeControlLabel(
+    value: CharSequence?
+  ): String {
+    return value
+      ?.toString()
+      ?.trim()
+      ?.lowercase(java.util.Locale.ROOT)
+      ?.replace(Regex("\\s+"), " ")
+      .orEmpty()
+  }
+
+  private fun isExactYouTubeSkipLabel(
+    node: AccessibilityNodeInfo
+  ): Boolean {
+    val labels = listOf(
+      normalizeYouTubeControlLabel(node.text),
+      normalizeYouTubeControlLabel(node.contentDescription)
+    )
+
+    return labels.any { label ->
+      label == "skip ad" ||
+        label == "skip ads" ||
+        label == "skip ad button" ||
+        label == "skip ads button" ||
+        label == "광고 건너뛰기" ||
+        label == "광고 건너뛰기 버튼"
+    }
+  }
+
+  private fun findYouTubeSkipNode(
+    node: AccessibilityNodeInfo?,
+    remainingBudget: IntArray
+  ): AccessibilityNodeInfo? {
+    if (node == null || remainingBudget[0] <= 0) return null
+
+    remainingBudget[0] -= 1
+
+    val packageName = node.packageName?.toString().orEmpty()
+    if (
+      packageName.isNotBlank() &&
+      packageName != YOUTUBE_PACKAGE_NAME
+    ) {
+      return null
+    }
+
+    if (node.isEnabled && isExactYouTubeSkipLabel(node)) {
+      return node
+    }
+
+    for (index in 0 until node.childCount) {
+      val found = findYouTubeSkipNode(
+        node.getChild(index),
+        remainingBudget
+      )
+
+      if (found != null) return found
+      if (remainingBudget[0] <= 0) break
+    }
+
+    return null
+  }
+
+  private fun findClickableYouTubeSkipTarget(
+    node: AccessibilityNodeInfo
+  ): AccessibilityNodeInfo? {
+    var current: AccessibilityNodeInfo? = node
+
+    repeat(4) {
+      val candidate = current ?: return null
+      if (
+        candidate.isEnabled &&
+        candidate.isClickable &&
+        candidate.packageName?.toString() == YOUTUBE_PACKAGE_NAME
+      ) {
+        return candidate
+      }
+
+      current = try {
+        candidate.parent
+      } catch (_: Exception) {
+        null
+      }
+    }
+
+    return null
+  }
+
+  private fun clickYouTubeSkipCandidate(
+    sourceNode: AccessibilityNodeInfo
+  ): Boolean {
+    val target = findClickableYouTubeSkipTarget(sourceNode) ?: return false
+    val result = target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+
+    if (result) {
+      lastYouTubeSkipClickAtMs = android.os.SystemClock.uptimeMillis()
+      appendDebugLog("YOUTUBE", "AUTO_SKIP_CLICKED")
+    } else {
+      appendDebugLog("YOUTUBE", "AUTO_SKIP_CLICK_FAILED")
+    }
+
+    return result
+  }
+
+  private fun handleYouTubeAutoSkipEvent(
+    event: AccessibilityEvent
+  ) {
+    if (!isYouTubeAutoSkipEnabled()) return
+    if (
+      event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+      event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+    ) {
+      return
+    }
+
+    val now = android.os.SystemClock.uptimeMillis()
+    if (now - lastYouTubeSkipClickAtMs < YOUTUBE_SKIP_CLICK_COOLDOWN_MS) {
+      return
+    }
+
+    var candidate: AccessibilityNodeInfo? = null
+    if (
+      now - lastYouTubeSkipSourceScanAtMs >=
+        YOUTUBE_SOURCE_SCAN_THROTTLE_MS
+    ) {
+      lastYouTubeSkipSourceScanAtMs = now
+      candidate = findYouTubeSkipNode(event.source, intArrayOf(120))
+    }
+
+    if (candidate != null) {
+      clickYouTubeSkipCandidate(candidate)
+      return
+    }
+
+    if (
+      now - lastYouTubeSkipFullScanAtMs <
+        YOUTUBE_FULL_SCAN_THROTTLE_MS
+    ) {
+      return
+    }
+
+    lastYouTubeSkipFullScanAtMs = now
+    val youtubeRoots = collectInteractiveRootsAcrossAllDisplays()
+      .filter { root ->
+        root.packageName?.toString() == YOUTUBE_PACKAGE_NAME
+      }
+
+    for (root in youtubeRoots) {
+      candidate = findYouTubeSkipNode(root, intArrayOf(400))
+      if (candidate != null) break
+    }
+
+    candidate?.let(::clickYouTubeSkipCandidate)
   }
 
   override fun onInterrupt() {
@@ -5597,6 +5771,12 @@ override fun onServiceConnected() {
     private const val TG_TO_GPT_FIND_RETRY_DELAY_MS = 250L
     private const val AUTO_SEND_FIRST_RETRY_DELAY_MS = 250L
     private const val AUTO_SEND_SECOND_RETRY_DELAY_MS = 150L
+    private const val YOUTUBE_PACKAGE_NAME = "com.google.android.youtube"
+    private const val YOUTUBE_AUTO_SKIP_PREFS = "copybridge_youtube_settings"
+    private const val YOUTUBE_AUTO_SKIP_KEY = "auto_skip_enabled"
+    private const val YOUTUBE_SOURCE_SCAN_THROTTLE_MS = 300L
+    private const val YOUTUBE_FULL_SCAN_THROTTLE_MS = 750L
+    private const val YOUTUBE_SKIP_CLICK_COOLDOWN_MS = 1200L
     const val COPY_MODE_FULL = "FULL"
     const val COPY_MODE_LAST = "LAST"
     private var activeService: CopyBridgeAccessibilityService? = null
