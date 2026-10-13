@@ -28,10 +28,6 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   private val bridgeGptIdleCompleteTimeoutMs: Long = 6000L
   private var bridgeGptInsufficientActionRowStreak = 0
   private var bridgeLastGptInsufficientActionRowAtMs: Long = 0L
-  private var bridgeLastGptInsufficientKeyboardCleanupAtMs: Long = 0L
-  private val bridgeGptInsufficientKeyboardCleanupCooldownMs: Long = 7000L
-  private var bridgeLastGptBusyKeyboardCleanupAtMs: Long = 0L
-  private val bridgeGptBusyKeyboardCleanupCooldownMs: Long = 8000L
   private val bridgeStatusMonitorRunnable = object : Runnable {
     override fun run() {
       runBridgeMonitorStatusTick()
@@ -53,67 +49,6 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       runPendingGptToTelegramCheck()
     }
   }
-  private var bridgeLastGptToTelegramStartWasTelegram = false
-  private var bridgeLastGptToTelegramStartAtMs: Long = 0L
-  private var bridgeLastTelegramStartSmallScreenBackUsedAtMs: Long = 0L
-  private val bridgeTelegramStartSmallScreenBackWindowMs: Long = 5500L
-
-  private fun rememberGptToTelegramStartFocus(source: String) {
-    val nowMs = System.currentTimeMillis()
-    val activePackage = try {
-      rootInActiveWindow?.packageName?.toString().orEmpty()
-    } catch (_: Exception) { "" }
-    val lastEventPackage = lastPackageName.orEmpty()
-    val telegramRoots = getTelegramRoots()
-    val editNodes = mutableListOf<AccessibilityNodeInfo>()
-    telegramRoots.forEach { root ->
-      collectTelegramEditTextNodes(root, editNodes)
-    }
-    val telegramEditFocused = editNodes.any { node ->
-      try { node.isFocused } catch (_: Exception) { false }
-    }
-    val startedFromTelegram = isTelegramPackage(activePackage)
-    val lastEventPackageWasTelegram = isTelegramPackage(lastEventPackage)
-
-    bridgeLastGptToTelegramStartWasTelegram = startedFromTelegram
-    bridgeLastGptToTelegramStartAtMs = nowMs
-    bridgeLastTelegramStartSmallScreenBackUsedAtMs = 0L
-
-    appendDebugLog(
-      "GPT→TG",
-      "GPT_TO_TG_START_FOCUS source=$source decision=activePackageOnly activePackage=$activePackage lastEventPackage=$lastEventPackage lastEventPackageWasTelegram=$lastEventPackageWasTelegram telegramRoots=${telegramRoots.size} editNodes=${editNodes.size} telegramEditFocused=$telegramEditFocused startedFromTelegram=$startedFromTelegram"
-    )
-  }
-
-  private fun shouldAllowTelegramStartSmallScreenBackAfterSend(
-    source: String,
-    focused: Boolean,
-    recentStubbornFocus: Boolean,
-    rootRect: android.graphics.Rect
-  ): Boolean {
-    if (source != "firstSent") return false
-    if (shouldAllowTelegramKeyboardBackAfterSend(rootRect)) return false
-    if (!focused && !recentStubbornFocus) return false
-    if (!bridgeLastGptToTelegramStartWasTelegram) return false
-
-    val nowMs = System.currentTimeMillis()
-    val startAgeMs = if (bridgeLastGptToTelegramStartAtMs > 0L) {
-      nowMs - bridgeLastGptToTelegramStartAtMs
-    } else { -1L }
-    if (startAgeMs !in 0L..bridgeTelegramStartSmallScreenBackWindowMs) return false
-
-    val alreadyUsed = bridgeLastTelegramStartSmallScreenBackUsedAtMs >= bridgeLastGptToTelegramStartAtMs
-    if (alreadyUsed) return false
-
-    bridgeLastTelegramStartSmallScreenBackUsedAtMs = nowMs
-
-    appendDebugLog(
-      "GPT→TG",
-      "TELEGRAM_START_SMALL_SCREEN_BACK_ALLOWED source=$source startAgeMs=$startAgeMs focused=$focused recentStubbornFocus=$recentStubbornFocus rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
-    )
-    return true
-  }
-
     private fun startBridgeStatusMonitor() {
     if (bridgeStatusMonitorRunning) return
 
@@ -443,70 +378,6 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     bridgeGptInsufficientActionRowStreak = 0
   }
 
-  private fun maybeDismissTelegramKeyboardAfterRepeatedGptInsufficientActionRow(
-    nowMs: Long, telegramRoots: List<AccessibilityNodeInfo>
-  ) {
-    if (bridgeGptInsufficientActionRowStreak < 3) return
-    val cooldownAgeMs = if (bridgeLastGptInsufficientKeyboardCleanupAtMs > 0L) {
-      nowMs - bridgeLastGptInsufficientKeyboardCleanupAtMs
-    } else { Long.MAX_VALUE }
-    if (cooldownAgeMs in 0L until bridgeGptInsufficientKeyboardCleanupCooldownMs) return
-
-    val editNode = findEditableNodeFromRoots(telegramRoots)
-    val editRect = Rect()
-    try { editNode?.getBoundsInScreen(editRect) } catch (_: Exception) {}
-    val selectedRoot = pickTelegramKeyboardRootRectForEditBounds(telegramRoots, editRect)
-    val telegramRoot = selectedRoot.first
-    val rootRect = selectedRoot.second
-    val allRootBounds = describeTelegramRootRectsForLog(telegramRoots)
-    if (telegramRoot == null || rootRect.isEmpty()) {
-      appendDebugLog("GPT→TG", "GPT_INSUFFICIENT_ACTION_ROW_KEYBOARD_CLEANUP_SKIPPED reason=noTelegramRoot streak=$bridgeGptInsufficientActionRowStreak allRootBounds=$allRootBounds editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}")
-      return
-    }
-    val allowBack = shouldAllowTelegramKeyboardBackAfterSend(rootRect)
-    if (allowBack) {
-      appendDebugLog("GPT→TG", "GPT_INSUFFICIENT_ACTION_ROW_KEYBOARD_CLEANUP_SKIPPED reason=sidePaneUsesBack streak=$bridgeGptInsufficientActionRowStreak rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} selectedRootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} allRootBounds=$allRootBounds editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}")
-      return
-    }
-    bridgeLastGptInsufficientKeyboardCleanupAtMs = nowMs
-    val result = tapTelegramRootRelativeKeyboardDismissSequenceAfterSend(source = "gptInsufficientActionRow", rootRect = rootRect)
-    appendDebugLog("GPT→TG", "GPT_INSUFFICIENT_ACTION_ROW_KEYBOARD_CLEANUP streak=$bridgeGptInsufficientActionRowStreak result=$result cooldownAgeMs=$cooldownAgeMs rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} selectedRootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} allRootBounds=$allRootBounds editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}")
-  }
-
-  private fun maybeDismissTelegramKeyboardDuringGptBusy(
-    nowMs: Long, telegramRoots: List<AccessibilityNodeInfo>, gptBusyByStop: Boolean, telegramTyping: Boolean
-  ) {
-    if (!gptBusyByStop) return
-    if (telegramTyping) return
-    val cooldownAgeMs = if (bridgeLastGptBusyKeyboardCleanupAtMs > 0L) {
-      nowMs - bridgeLastGptBusyKeyboardCleanupAtMs
-    } else { Long.MAX_VALUE }
-    if (cooldownAgeMs in 0L until bridgeGptBusyKeyboardCleanupCooldownMs) return
-
-    val editNode = findEditableNodeFromRoots(telegramRoots)
-    val editRect = Rect()
-    try { editNode?.getBoundsInScreen(editRect) } catch (_: Exception) {}
-    val selectedRoot = pickTelegramKeyboardRootRectForEditBounds(telegramRoots, editRect)
-    val telegramRoot = selectedRoot.first
-    val rootRect = selectedRoot.second
-    val allRootBounds = describeTelegramRootRectsForLog(telegramRoots)
-    if (telegramRoot == null || rootRect.isEmpty()) {
-      bridgeLastGptBusyKeyboardCleanupAtMs = nowMs
-      appendDebugLog("GPT→TG", "GPT_BUSY_KEYBOARD_CLEANUP_SKIPPED reason=noTelegramRoot allRootBounds=$allRootBounds editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}")
-      return
-    }
-    val allowBack = shouldAllowTelegramKeyboardBackAfterSend(rootRect)
-    if (allowBack) {
-      bridgeLastGptBusyKeyboardCleanupAtMs = nowMs
-      appendDebugLog("GPT→TG", "GPT_BUSY_KEYBOARD_CLEANUP_SKIPPED reason=sidePaneUsesBack rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} selectedRootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} allRootBounds=$allRootBounds editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}")
-      return
-    }
-    val editFocused = try { editNode?.isFocused ?: false } catch (_: Exception) { false }
-    bridgeLastGptBusyKeyboardCleanupAtMs = nowMs
-    val result = tapTelegramRootRelativeKeyboardDismissSequenceAfterSend(source = "gptBusy", rootRect = rootRect)
-    appendDebugLog("GPT→TG", "GPT_BUSY_KEYBOARD_CLEANUP result=$result cooldownAgeMs=$cooldownAgeMs editFound=${editNode != null} editFocused=$editFocused rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} selectedRootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} allRootBounds=$allRootBounds editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}")
-  }
-
   private fun collectGptCompletionActionNodesForDecision(
     node: android.view.accessibility.AccessibilityNodeInfo?,
     out: MutableList<Pair<String, android.graphics.Rect>>
@@ -599,20 +470,6 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
 
       appendDebugLog("GPT→TG", "GPT_TEXT_CHANGE_SCAN candidates=latest changed=$gptTextChanged active=$gptBusyByTextChange ageMs=$gptTextChangeAgeMs")
       appendDebugLog("GPT→TG", "GPT_TEXT_CHANGE_GUARD changed=$gptTextChanged previousBusy=$previousGptBusy stop=$gptBusyByStop actionComplete=$gptCompletedByActionRow recentStop=$gptTextChangeRecentStopSeen active=$gptBusyByTextChange")
-
-      if (!gptCompletedByActionRow && !gptBusyByStop) {
-        maybeDismissTelegramKeyboardAfterRepeatedGptInsufficientActionRow(
-          nowMs = nowMs,
-          telegramRoots = tgRootsForMonitor
-        )
-      }
-
-      maybeDismissTelegramKeyboardDuringGptBusy(
-        nowMs = nowMs,
-        telegramRoots = tgRootsForMonitor,
-        gptBusyByStop = gptBusyByStop,
-        telegramTyping = telegramTyping
-      )
 
       if (gptBusyByStop || (gptTextChanged && !gptCompletedByActionRow && gptTextChangeRecentStopSeen)) {
         lastBridgeMonitorGptActivityAtMs = nowMs
@@ -1185,55 +1042,35 @@ override fun onServiceConnected() {
   ) {
     Handler(Looper.getMainLooper()).postDelayed({
       val firstRoots = getTelegramRoots()
-      val firstSent = clickSendButton(firstRoots)
+      val firstEdit = findEditableNodeFromRoots(firstRoots) ?: editableNode
+      val firstSent = clickTelegramSendButtonSafely(firstRoots, firstEdit)
 
       if (firstSent) {
         Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode + 전송", Toast.LENGTH_SHORT).show()
-        hideTelegramKeyboardBySafeChatTapAfterSend("firstSent")
+        hideTelegramKeyboardAfterSendSafely("firstSent")
         return@postDelayed
       }
 
-      val firstEdit = findEditableNodeFromRoots(firstRoots) ?: editableNode
-      firstEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-      firstEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-
       Handler(Looper.getMainLooper()).postDelayed({
         val secondRoots = getTelegramRoots()
-        val secondSent = clickSendButton(secondRoots)
+        val secondEdit = findEditableNodeFromRoots(secondRoots) ?: firstEdit
+        val secondSent = clickTelegramSendButtonSafely(secondRoots, secondEdit)
 
         if (secondSent) {
           Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode + 전송", Toast.LENGTH_SHORT).show()
-          hideTelegramKeyboardBySafeChatTapAfterSend("secondSent")
-          return@postDelayed
+          hideTelegramKeyboardAfterSendSafely("secondSent")
+        } else {
+          val debug = buildTelegramCopyDebugInfo(secondRoots)
+          copyToClipboard(debug)
+          Toast.makeText(
+            this,
+            "붙여넣기는 완료했지만 안전한 Telegram 전송 버튼을 찾지 못했습니다.",
+            Toast.LENGTH_SHORT
+          ).show()
         }
-
-        val secondEdit = findEditableNodeFromRoots(secondRoots) ?: firstEdit
-        secondEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-        secondEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-
-        Handler(Looper.getMainLooper()).postDelayed({
-          val thirdRoots = getTelegramRoots()
-          val thirdSent = clickSendButton(thirdRoots)
-
-          if (thirdSent) {
-            Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode + 전송", Toast.LENGTH_SHORT).show()
-            hideTelegramKeyboardBySafeChatTapAfterSend("thirdSent")
-          } else {
-            val debug = buildTelegramCopyDebugInfo(thirdRoots)
-            copyToClipboard(debug)
-            Toast.makeText(
-              this,
-              "붙여넣기는 완료, Telegram 전송 버튼은 찾지 못했습니다. 진단 정보가 복사되었습니다.",
-              Toast.LENGTH_SHORT
-            ).show()
-          }
-        }, 350L)
       }, 350L)
     }, 450L)
   }
-
-  private var lastTelegramClearFocusStillFocusedAtMs: Long = 0L
-  private var lastTelegramClearFocusStillFocusedSource: String = ""
 
   private fun clearTelegramInputFocusAfterSend(source: String): Boolean {
     val roots = getTelegramRoots()
@@ -1270,11 +1107,6 @@ override fun onServiceConnected() {
     val result = targetNode.performAction(AccessibilityNodeInfo.ACTION_CLEAR_FOCUS)
     val stillFocused = targetNode.isFocused
 
-    if (stillFocused) {
-      lastTelegramClearFocusStillFocusedAtMs = System.currentTimeMillis()
-      lastTelegramClearFocusStillFocusedSource = source
-    }
-
     appendDebugLog(
       "GPT→TG",
       "TELEGRAM_INPUT_CLEAR_FOCUS_AFTER_SEND source=$source result=$result focused=$stillFocused editNodes=${editNodes.size} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
@@ -1299,185 +1131,144 @@ override fun onServiceConnected() {
     }
   }
 
-  private fun hideTelegramKeyboardBySafeChatTapAfterSend(
+  private fun getTelegramDisplayIdsForKeyboardCleanup(): Set<Int> {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptySet()
+
+    val telegramWindowIds = getTelegramRoots()
+      .map { root -> root.windowId }
+      .toSet()
+    if (telegramWindowIds.isEmpty()) return emptySet()
+
+    return getInteractiveWindowsAcrossAllDisplays()
+      .filter { window -> telegramWindowIds.contains(window.id) }
+      .map { window -> window.displayId }
+      .toSet()
+  }
+
+  private fun hasVisibleImeWindowOnTelegramDisplay(
+    source: String
+  ): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+      appendDebugLog(
+        "GPT→TG",
+        "TELEGRAM_IME_WINDOW_CHECK source=$source result=false reason=apiBelowR"
+      )
+      return false
+    }
+
+    val telegramDisplayIds = getTelegramDisplayIdsForKeyboardCleanup()
+    if (telegramDisplayIds.isEmpty()) {
+      appendDebugLog(
+        "GPT→TG",
+        "TELEGRAM_IME_WINDOW_CHECK source=$source result=false reason=noTelegramDisplay"
+      )
+      return false
+    }
+
+    val matchingImeWindows = getInteractiveWindowsAcrossAllDisplays()
+      .filter { window ->
+        if (
+          window.type !=
+            android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
+        ) {
+          return@filter false
+        }
+        if (!telegramDisplayIds.contains(window.displayId)) {
+          return@filter false
+        }
+
+        val rect = android.graphics.Rect()
+        try {
+          window.getBoundsInScreen(rect)
+        } catch (_: Exception) {
+          return@filter false
+        }
+        !rect.isEmpty()
+      }
+
+    val result = matchingImeWindows.isNotEmpty()
+    appendDebugLog(
+      "GPT→TG",
+      "TELEGRAM_IME_WINDOW_CHECK source=$source result=$result telegramDisplays=${telegramDisplayIds.joinToString(",")} imeCount=${matchingImeWindows.size}"
+    )
+    return result
+  }
+
+  private fun hideTelegramKeyboardAfterSendSafely(
     source: String
   ) {
     val clearResult = clearTelegramInputFocusAfterSend(source)
 
     appendDebugLog(
       "GPT→TG",
-      "TELEGRAM_POST_SEND_NO_CONTENT_TAP source=$source clearFocus=$clearResult"
+      "TELEGRAM_POST_SEND_CLEAR_FOCUS source=$source result=$clearResult"
     )
 
     Handler(Looper.getMainLooper()).postDelayed({
-      val hideButtonResult = tapKeyboardHideButtonAfterSend(source)
+      val hideButtonResult = clickKeyboardHideButtonAfterSendSafely(source)
 
       appendDebugLog(
         "GPT→TG",
         "TELEGRAM_KEYBOARD_HIDE_BUTTON_RESULT source=$source result=$hideButtonResult"
       )
 
-      if (!hideButtonResult) {
-        closeTelegramKeyboardWithBackIfInputStillFocused(source)
-      }
+      Handler(Looper.getMainLooper()).postDelayed(beforeBack@{
+        val imeVisibleBeforeBack = hasVisibleImeWindowOnTelegramDisplay(
+          "${source}_beforeBack"
+        )
+
+        if (!imeVisibleBeforeBack) {
+          appendDebugLog(
+            "GPT→TG",
+            "TELEGRAM_KEYBOARD_BACK_SKIPPED source=$source reason=noImeWindow"
+          )
+          return@beforeBack
+        }
+
+        val backResult = performGlobalAction(GLOBAL_ACTION_BACK)
+        appendDebugLog(
+          "GPT→TG",
+          "TELEGRAM_KEYBOARD_BACK source=$source result=$backResult reason=confirmedImeWindow"
+        )
+
+        Handler(Looper.getMainLooper()).postDelayed({
+          val stillVisible = hasVisibleImeWindowOnTelegramDisplay(
+            "${source}_afterBack"
+          )
+          appendDebugLog(
+            "GPT→TG",
+            "TELEGRAM_KEYBOARD_BACK_VERIFY source=$source imeStillVisible=$stillVisible secondBack=false"
+          )
+        }, 300L)
+      }, 300L)
     }, 260L)
   }
 
 
-  private fun closeTelegramKeyboardWithBackIfInputStillFocused(source: String): Boolean {
-    val roots = getTelegramRoots()
-    if (roots.isEmpty()) {
-      appendDebugLog(
-        "GPT→TG",
-        "TELEGRAM_KEYBOARD_BACK_AFTER_SEND_SKIPPED source=$source reason=noTelegramRoot"
-      )
-      return false
-    }
-
-    val editNodes = mutableListOf<AccessibilityNodeInfo>()
-    roots.forEach { root ->
-      collectTelegramEditTextNodes(root, editNodes)
-    }
-
-    val now = System.currentTimeMillis()
-    val clearFocusAgeMs = if (lastTelegramClearFocusStillFocusedAtMs > 0L) {
-      now - lastTelegramClearFocusStillFocusedAtMs
-    } else {
-      -1L
-    }
-    val recentStubbornFocus = clearFocusAgeMs in 0L..1800L &&
-      lastTelegramClearFocusStillFocusedSource == source
-
-    val focusedNode = editNodes.firstOrNull { it.isFocused }
-    val hasFocusedEditTextForBack = focusedNode != null
-
-    if (focusedNode == null && !recentStubbornFocus) {
-      appendDebugLog(
-        "GPT→TG",
-        "TELEGRAM_KEYBOARD_BACK_AFTER_SEND_SKIPPED source=$source reason=noFocusedEditTextAndNoRecentStubbornFocus editNodes=${editNodes.size} clearFocusAgeMs=$clearFocusAgeMs"
-      )
-      return false
-    }
-
-    val focusedEditRect = android.graphics.Rect()
-    focusedNode?.getBoundsInScreen(focusedEditRect)
-    val selectedRoot = pickTelegramKeyboardRootRectForEditBounds(roots, focusedEditRect)
-    val selectedRootRect = selectedRoot.second
-    val allRootBounds = describeTelegramRootRectsForLog(roots)
-
-    val keyboardLikelyVisibleByEditPosition = if (editNodes.isNotEmpty()) {
-      val lowestEdit = focusedNode ?: editNodes.maxByOrNull { n ->
-        val r = android.graphics.Rect()
-        n.getBoundsInScreen(r)
-        r.bottom
-      }
-      if (lowestEdit != null) {
-        val editBounds = android.graphics.Rect()
-        lowestEdit.getBoundsInScreen(editBounds)
-        val gapFromBottom = selectedRootRect.bottom - editBounds.bottom
-        val keyboardPlusInputArea = 500
-        editBounds.bottom > 0 && gapFromBottom >= keyboardPlusInputArea
-      } else {
-        false
-      }
-    } else {
-      false
-    }
-
-    val allowBackForKeyboardClose = shouldAllowTelegramKeyboardBackAfterSend(selectedRootRect)
-    val allowTelegramStartSmallScreenBack = shouldAllowTelegramStartSmallScreenBackAfterSend(
-      source = source,
-      focused = hasFocusedEditTextForBack,
-      recentStubbornFocus = recentStubbornFocus,
-      rootRect = selectedRootRect
-    ) ||
-      shouldAllowTelegramStartSmallScreenBackAfterSend(
-        source = source,
-        focused = hasFocusedEditTextForBack,
-        recentStubbornFocus = recentStubbornFocus,
-        rootRect = selectedRootRect
-      )
-
-    if (!allowBackForKeyboardClose && !allowTelegramStartSmallScreenBack) {
-      appendDebugLog(
-        "GPT→TG",
-        "TELEGRAM_KEYBOARD_CLEANUP_SKIPPED source=$source reason=unsafeLayout focused=$hasFocusedEditTextForBack recentStubbornFocus=$recentStubbornFocus clearFocusAgeMs=$clearFocusAgeMs"
-      )
-      return false
-    }
-
-    val targetNode = focusedNode ?: editNodes.maxByOrNull { node ->
-      val rect = android.graphics.Rect()
-      node.getBoundsInScreen(rect)
-      rect.bottom
-    }
-
-    if (targetNode == null) {
-      appendDebugLog(
-        "GPT→TG",
-        "TELEGRAM_KEYBOARD_BACK_AFTER_SEND_SKIPPED source=$source reason=noEditText editNodes=0 clearFocusAgeMs=$clearFocusAgeMs recentStubbornFocus=$recentStubbornFocus"
-      )
-      return false
-    }
-
-    val rect = android.graphics.Rect()
-    targetNode.getBoundsInScreen(rect)
-
-    val reason = when {
-          allowTelegramStartSmallScreenBack -> "telegramStartSmallScreenBack"
-          hasFocusedEditTextForBack -> "focusedEditText"
-          keyboardLikelyVisibleByEditPosition -> "recentStubbornFocusKeyboardVisible"
-          else -> "unexpectedBackGuard"
-        }
-    val shouldRunBackForKeyboardClose = hasFocusedEditTextForBack || allowTelegramStartSmallScreenBack || keyboardLikelyVisibleByEditPosition
-    if (!shouldRunBackForKeyboardClose) {
-        appendDebugLog(
-            "GPT→TG",
-            "TELEGRAM_KEYBOARD_BACK_AFTER_SEND_SKIPPED source=$source reason=recentStubbornFocusOnlyBackBlocked keyboardLikelyVisibleByEditPosition=$keyboardLikelyVisibleByEditPosition focused=$hasFocusedEditTextForBack recentStubbornFocus=$recentStubbornFocus allowBackForKeyboardClose=$allowBackForKeyboardClose allowTelegramStartSmallScreenBack=$allowTelegramStartSmallScreenBack clearFocusAgeMs=$clearFocusAgeMs rootBounds=${selectedRootRect.left},${selectedRootRect.top},${selectedRootRect.right},${selectedRootRect.bottom}"
-        )
-        return false
-    }
-
-    if (allowTelegramStartSmallScreenBack) {
-      appendDebugLog(
-        "GPT→TG",
-        "TELEGRAM_START_SMALL_SCREEN_BACK_EXECUTE source=$source rootBounds=${selectedRootRect.left},${selectedRootRect.top},${selectedRootRect.right},${selectedRootRect.bottom}"
-      )
-    }
-
-    val result = performGlobalAction(GLOBAL_ACTION_BACK)
-    appendDebugLog(
-      "GPT→TG",
-      "TELEGRAM_KEYBOARD_BACK_AFTER_SEND source=$source result=$result reason=$reason editNodes=${editNodes.size} clearFocusAgeMs=$clearFocusAgeMs recentStubbornFocus=$recentStubbornFocus bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} selectedRootBounds=${selectedRootRect.left},${selectedRootRect.top},${selectedRootRect.right},${selectedRootRect.bottom} allRootBounds=$allRootBounds"
-    )
-
-    return result
-  }
-
-  private fun shouldAllowTelegramKeyboardBackAfterSend(rootRect: android.graphics.Rect): Boolean {
-    if (rootRect.isEmpty()) return false
-
-    val width = rootRect.width().coerceAtLeast(1)
-    val height = rootRect.height()
-
-    val startsNearTop = rootRect.top <= 120
-    val tallSidePane = height >= (width * 1.8f).toInt()
-
-    return startsNearTop && tallSidePane
-  }
-
-
-  private fun tapKeyboardHideButtonAfterSend(source: String): Boolean {
+  private fun clickKeyboardHideButtonAfterSendSafely(source: String): Boolean {
     val candidates = mutableListOf<AccessibilityNodeInfo>()
 
-    windows.forEach { window ->
+    val telegramDisplayIds = getTelegramDisplayIdsForKeyboardCleanup()
+    val candidateWindows = getInteractiveWindowsAcrossAllDisplays()
+      .filter { window ->
+        if (
+          Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+          telegramDisplayIds.isNotEmpty()
+        ) {
+          telegramDisplayIds.contains(window.displayId)
+        } else {
+          true
+        }
+      }
+
+    candidateWindows.forEach { window ->
       val root = window.root ?: return@forEach
       collectKeyboardHideButtonCandidates(root, candidates)
     }
 
     val target = candidates.firstOrNull()
     if (target == null) {
-      val windowSummary = windows.mapNotNull { window ->
+      val windowSummary = candidateWindows.mapNotNull { window ->
         val root = window.root ?: return@mapNotNull null
         val rect = android.graphics.Rect()
         root.getBoundsInScreen(rect)
@@ -1493,27 +1284,14 @@ override fun onServiceConnected() {
       return false
     }
 
-    val rect = android.graphics.Rect()
-    target.getBoundsInScreen(rect)
-    val centerX = rect.centerX().toFloat()
-    val centerY = rect.centerY().toFloat()
-
-    val path = android.graphics.Path().apply {
-      moveTo(centerX, centerY)
-    }
-
-    val gesture = android.accessibilityservice.GestureDescription.Builder()
-      .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0L, 70L))
-      .build()
-
-    val dispatched = dispatchGesture(gesture, null, null)
+    val clicked = clickNodeOrNearClickableParentSafely(target) { true }
 
     appendDebugLog(
       "GPT→TG",
-      "TELEGRAM_KEYBOARD_HIDE_BUTTON_AFTER_SEND source=$source dispatched=$dispatched label=${buildNodeLabel(target)} class=${target.className} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
+      "TELEGRAM_KEYBOARD_HIDE_BUTTON_AFTER_SEND source=$source clicked=$clicked label=${buildNodeLabel(target)} class=${target.className}"
     )
 
-    return dispatched
+    return clicked
   }
 
   private fun collectKeyboardHideButtonCandidates(
@@ -1522,15 +1300,18 @@ override fun onServiceConnected() {
   ) {
     if (node == null) return
 
-    val label = buildNodeLabel(node)
-
-    val looksLikeKeyboardHide =
-      label.contains("키보드 숨기기", ignoreCase = true) ||
-      label.contains("키보드 닫기", ignoreCase = true) ||
-      label.contains("키보드 내리기", ignoreCase = true) ||
-      label.contains("Hide keyboard", ignoreCase = true) ||
-      label.contains("Close keyboard", ignoreCase = true) ||
-      label.contains("Dismiss keyboard", ignoreCase = true)
+    val labels = listOf(
+      normalizeExactControlLabel(node.text),
+      normalizeExactControlLabel(node.contentDescription)
+    )
+    val looksLikeKeyboardHide = labels.any { label ->
+      label == "키보드 숨기기" ||
+        label == "키보드 닫기" ||
+        label == "키보드 내리기" ||
+        label == "hide keyboard" ||
+        label == "close keyboard" ||
+        label == "dismiss keyboard"
+    }
 
     if (looksLikeKeyboardHide) {
       out.add(node)
@@ -1541,228 +1322,6 @@ override fun onServiceConnected() {
     }
   }
 
-  private fun tapGptSafeAreaAfterTelegramKeyboardCleanup(
-    source: String,
-    telegramRootRect: android.graphics.Rect
-  ): Boolean {
-    val gptRoots = collectGptMonitorRoots()
-    val gptRootRects = gptRoots.mapNotNull { root ->
-      val rect = android.graphics.Rect()
-      try {
-        root.getBoundsInScreen(rect)
-      } catch (_: Exception) {
-        return@mapNotNull null
-      }
-      if (rect.isEmpty()) null else root to rect
-    }
-
-    val selected = gptRootRects.minWithOrNull(
-      compareBy<Pair<AccessibilityNodeInfo, android.graphics.Rect>> { it.second.width().toLong() * it.second.height().toLong() }
-        .thenBy { it.second.top }
-        .thenBy { it.second.left }
-    )
-
-    val fallbackFromTelegram = selected == null
-    val gptRect = selected?.second ?: android.graphics.Rect()
-
-    if (fallbackFromTelegram && telegramRootRect.isEmpty()) {
-      appendDebugLog(
-        "GPT→TG",
-        "GPT_SAFE_TAP_AFTER_TELEGRAM_KEYBOARD_CLEANUP_SKIPPED source=$source reason=noGptRootAndEmptyTelegramRoot gptRoots=${gptRoots.size} telegramRootBounds=${telegramRootRect.left},${telegramRootRect.top},${telegramRootRect.right},${telegramRootRect.bottom}"
-      )
-      return false
-    }
-
-    val tapX: Float
-    val rawTapY: Float
-    val minTapY: Float
-    val maxTapY: Float
-    val tapBasis: String
-
-    if (!fallbackFromTelegram) {
-      tapBasis = "gptRoot"
-      tapX = gptRect.left + (gptRect.width() * 0.50f)
-      rawTapY = gptRect.top + (gptRect.height() * 0.28f)
-      minTapY = gptRect.top + 80f
-      val telegramSafeMaxY = if (!telegramRootRect.isEmpty()) {
-        telegramRootRect.top - 120f
-      } else {
-        gptRect.bottom - 180f
-      }
-      val rootSafeMaxY = gptRect.bottom - 180f
-      maxTapY = maxOf(minTapY, minOf(telegramSafeMaxY, rootSafeMaxY))
-    } else {
-      tapBasis = "telegramTopFallback"
-      tapX = telegramRootRect.left + (telegramRootRect.width() * 0.50f)
-      rawTapY = telegramRootRect.top - 260f
-      minTapY = 80f
-      maxTapY = maxOf(minTapY, telegramRootRect.top - 120f)
-    }
-
-    val tapY = rawTapY.coerceIn(minTapY, maxTapY)
-
-    val path = android.graphics.Path().apply {
-      moveTo(tapX, tapY)
-    }
-
-    val gesture = android.accessibilityservice.GestureDescription.Builder()
-      .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0L, 70L))
-      .build()
-
-    val dispatched = dispatchGesture(gesture, null, null)
-
-    appendDebugLog(
-      "GPT→TG",
-      "GPT_SAFE_TAP_AFTER_TELEGRAM_KEYBOARD_CLEANUP source=$source dispatched=$dispatched tapBasis=$tapBasis fallbackFromTelegram=$fallbackFromTelegram tapX=${tapX.toInt()} tapY=${tapY.toInt()} rawTapY=${rawTapY.toInt()} minTapY=${minTapY.toInt()} maxTapY=${maxTapY.toInt()} gptRoots=${gptRoots.size} gptRootBounds=${gptRect.left},${gptRect.top},${gptRect.right},${gptRect.bottom} telegramRootBounds=${telegramRootRect.left},${telegramRootRect.top},${telegramRootRect.right},${telegramRootRect.bottom}"
-    )
-
-    return dispatched
-  }
-
-  private fun tapTelegramRootRelativeKeyboardDismissSequenceAfterSend(
-    source: String,
-    rootRect: android.graphics.Rect
-  ): Boolean {
-    val ratios = listOf(0.45f, 0.60f, 0.70f)
-    var firstDispatchResult = false
-
-    ratios.forEachIndexed { index, ratio ->
-      val delayMs = index * 300L
-
-      if (index == 0) {
-        firstDispatchResult = tapTelegramRootRelativeKeyboardDismissAfterSend(
-          source = "${source}_seq${index + 1}",
-          rootRect = rootRect,
-          yRatio = ratio
-        )
-      } else {
-        Handler(Looper.getMainLooper()).postDelayed({
-          tapTelegramRootRelativeKeyboardDismissAfterSend(
-            source = "${source}_seq${index + 1}",
-            rootRect = rootRect,
-            yRatio = ratio
-          )
-        }, delayMs)
-      }
-    }
-
-    appendDebugLog(
-      "GPT→TG",
-      "TELEGRAM_ROOT_RELATIVE_KEYBOARD_TAP_SEQUENCE_AFTER_SEND source=$source firstDispatchResult=$firstDispatchResult ratios=0.45,0.60,0.70 intervalMs=300 rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
-    )
-
-    val allowBackForKeyboardClose = shouldAllowTelegramKeyboardBackAfterSend(rootRect)
-    if (!allowBackForKeyboardClose) {
-      Handler(Looper.getMainLooper()).postDelayed({
-        tapGptSafeAreaAfterTelegramKeyboardCleanup(
-          source = source,
-          telegramRootRect = rootRect
-        )
-      }, 1120L)
-
-      appendDebugLog(
-        "GPT→TG",
-        "GPT_SAFE_TAP_AFTER_TELEGRAM_KEYBOARD_CLEANUP_SCHEDULED source=$source delayMs=1120 rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
-      )
-    } else {
-      appendDebugLog(
-        "GPT→TG",
-        "GPT_SAFE_TAP_AFTER_TELEGRAM_KEYBOARD_CLEANUP_SKIPPED source=$source reason=sidePaneUsesBack rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
-      )
-    }
-
-    return firstDispatchResult
-  }
-
-  private fun tapTelegramRootRelativeKeyboardDismissAfterSend(
-    source: String,
-    rootRect: android.graphics.Rect,
-    yRatio: Float
-  ): Boolean {
-    if (rootRect.isEmpty()) {
-      appendDebugLog(
-        "GPT→TG",
-        "TELEGRAM_ROOT_RELATIVE_KEYBOARD_TAP_AFTER_SEND_SKIPPED source=$source reason=emptyRoot"
-      )
-      return false
-    }
-
-    val clampedRatio = yRatio.coerceIn(0.12f, 0.70f)
-    val rawTapX = rootRect.centerX().toFloat()
-    val rawTapY = (rootRect.top + (rootRect.height() * clampedRatio)).toFloat()
-
-    val allowBackForKeyboardClose = shouldAllowTelegramKeyboardBackAfterSend(rootRect)
-
-    var tapY = rawTapY
-    var editTopForCap = -1
-    var editNodesForCap = 0
-    var capApplied = false
-
-    if (!allowBackForKeyboardClose) {
-      val tgRoots = getTelegramRoots()
-      val editNodes = mutableListOf<AccessibilityNodeInfo>()
-
-      tgRoots.forEach { root ->
-        val candidateRootRect = android.graphics.Rect()
-        try { root.getBoundsInScreen(candidateRootRect) } catch (_: Exception) {}
-
-        val rootLooksRelated = !candidateRootRect.isEmpty() && (
-          candidateRootRect == rootRect ||
-          android.graphics.Rect.intersects(candidateRootRect, rootRect) ||
-          rootRect.contains(candidateRootRect.centerX(), candidateRootRect.centerY())
-        )
-
-        if (rootLooksRelated) {
-          collectTelegramEditTextNodes(root, editNodes)
-        }
-      }
-
-      val editRects = editNodes.mapNotNull { node ->
-        val rect = android.graphics.Rect()
-        try { node.getBoundsInScreen(rect) } catch (_: Exception) { return@mapNotNull null }
-        if (!rect.isEmpty() && android.graphics.Rect.intersects(rootRect, rect)) { rect } else { null }
-      }
-
-      editNodesForCap = editRects.size
-      val unsafeEditTop = editRects.minOfOrNull { it.top }
-      if (unsafeEditTop != null) {
-        editTopForCap = unsafeEditTop
-        val minTapY = rootRect.top + 80f
-        val rootBottomSafeY = rootRect.bottom - 80f
-        val editSafeMaxY = unsafeEditTop - 96f
-        val cappedMaxY = minOf(rootBottomSafeY, editSafeMaxY)
-
-        if (cappedMaxY > minTapY) {
-          val cappedTapY = minOf(rawTapY, cappedMaxY)
-          capApplied = cappedTapY != rawTapY
-          tapY = cappedTapY
-        } else {
-          tapY = minTapY
-          capApplied = tapY != rawTapY
-        }
-      }
-    }
-
-    val finalTapX = rawTapX
-    tapY = tapY.coerceIn(rootRect.top + 40f, rootRect.bottom - 40f)
-
-    val path = android.graphics.Path().apply {
-      moveTo(finalTapX, tapY)
-    }
-
-    val gesture = android.accessibilityservice.GestureDescription.Builder()
-      .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0L, 70L))
-      .build()
-
-    val dispatched = dispatchGesture(gesture, null, null)
-
-    appendDebugLog(
-      "GPT→TG",
-      "TELEGRAM_ROOT_RELATIVE_KEYBOARD_TAP_AFTER_SEND source=$source dispatched=$dispatched ratio=$clampedRatio tapX=${finalTapX.toInt()} tapY=${tapY.toInt()} rawTapY=${rawTapY.toInt()} capApplied=$capApplied editTopForCap=$editTopForCap editNodesForCap=$editNodesForCap allowBackForKeyboardClose=$allowBackForKeyboardClose rootBounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom}"
-    )
-
-    return dispatched
-  }
   private fun getTelegramRoots(): List<AccessibilityNodeInfo> {
     return collectInteractiveRootsAcrossAllDisplays()
       .filter { root ->
@@ -1787,63 +1346,6 @@ override fun onServiceConnected() {
     )
 
     return telegramRoots.isNotEmpty() && gptRoots.isNotEmpty()
-  }
-
-  private fun describeTelegramRootRectsForLog(roots: List<AccessibilityNodeInfo>): String {
-    return roots.mapIndexedNotNull { index, root ->
-      val rect = Rect()
-      try {
-        root.getBoundsInScreen(rect)
-        if (rect.isEmpty()) {
-          null
-        } else {
-          "#$index=${rect.left},${rect.top},${rect.right},${rect.bottom}"
-        }
-      } catch (_: Exception) {
-        null
-      }
-    }.joinToString(";")
-  }
-
-  private fun pickTelegramKeyboardRootRectForEditBounds(
-    roots: List<AccessibilityNodeInfo>,
-    editRect: Rect
-  ): Pair<AccessibilityNodeInfo?, Rect> {
-    val rootRects = roots.mapNotNull { root ->
-      val rect = Rect()
-      try {
-        root.getBoundsInScreen(rect)
-      } catch (_: Exception) {
-        return@mapNotNull null
-      }
-      if (rect.isEmpty()) null else root to rect
-    }
-
-    if (rootRects.isEmpty()) {
-      return null to Rect()
-    }
-
-    val editCenterX = editRect.centerX()
-    val editCenterY = editRect.centerY()
-    val hasValidEditRect = !editRect.isEmpty() && editRect.bottom > editRect.top && editRect.right > editRect.left
-
-    val containing = if (hasValidEditRect) {
-      rootRects.filter { (_, rootRect) ->
-        rootRect.contains(editCenterX, editCenterY) ||
-        Rect.intersects(rootRect, editRect)
-      }
-    } else {
-      emptyList()
-    }
-
-    val selected = (if (containing.isNotEmpty()) containing else rootRects)
-      .minWithOrNull(
-        compareBy<Pair<AccessibilityNodeInfo, Rect>> { it.second.width().toLong() * it.second.height().toLong() }
-          .thenBy { it.second.top }
-          .thenBy { it.second.left }
-      )
-
-    return selected ?: (null to Rect())
   }
 
   private fun isTelegramPackage(packageName: String): Boolean {
@@ -3047,54 +2549,135 @@ override fun onServiceConnected() {
 
   private fun setTextToNode(node: AccessibilityNodeInfo, text: String): Boolean {
     node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
     val arguments = Bundle().apply {
       putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
     }
-    return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+    val directResult = node.performAction(
+      AccessibilityNodeInfo.ACTION_SET_TEXT,
+      arguments
+    )
+    if (directResult) return true
+
+    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    return node.performAction(
+      AccessibilityNodeInfo.ACTION_SET_TEXT,
+      arguments
+    )
   }
 
   private fun pasteClipboardToNode(node: AccessibilityNodeInfo): Boolean {
     node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+    val directResult = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+    if (directResult) return true
+
     node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
     return node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
   }
 
-  private fun clickSendButton(roots: List<AccessibilityNodeInfo>): Boolean {
-    roots.forEach { root ->
-      val sendButton = findSendButton(root)
-      if (sendButton != null) {
-        return clickNodeOrClickableParent(sendButton)
+  private fun normalizeExactControlLabel(value: CharSequence?): String {
+    return value
+      ?.toString()
+      ?.trim()
+      ?.lowercase(java.util.Locale.ROOT)
+      ?.replace(Regex("\\s+"), " ")
+      .orEmpty()
+  }
+
+  private fun clickNodeOrNearClickableParentSafely(
+    node: AccessibilityNodeInfo?,
+    expectedPackage: (String) -> Boolean
+  ): Boolean {
+    var current = node ?: return false
+    var depth = 0
+
+    while (depth <= 2) {
+      val packageName = current.packageName?.toString().orEmpty()
+      if (current.isEnabled && expectedPackage(packageName)) {
+        if (current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+          return true
+        }
       }
+
+      if (depth == 2) break
+      current = try {
+        current.parent ?: return false
+      } catch (_: Exception) {
+        return false
+      }
+      depth += 1
     }
+
     return false
   }
 
-  private fun findSendButton(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-    if (node == null) return null
-    if (isSendButton(node)) return node
-    for (index in 0 until node.childCount) {
-      val found = findSendButton(node.getChild(index))
-      if (found != null) return found
-    }
-    return null
+  private fun isExactTelegramSendNode(node: AccessibilityNodeInfo): Boolean {
+    if (!node.isEnabled) return false
+    if (!isTelegramPackage(node.packageName?.toString().orEmpty())) return false
+
+    val text = normalizeExactControlLabel(node.text)
+    val desc = normalizeExactControlLabel(node.contentDescription)
+    val viewId = node.viewIdResourceName
+      ?.substringAfterLast('/')
+      ?.lowercase(java.util.Locale.ROOT)
+      .orEmpty()
+
+    val labelMatch = text in setOf(
+      "send", "전송", "보내기", "메시지 보내기"
+    ) || desc in setOf(
+      "send", "send message", "전송", "보내기", "메시지 보내기"
+    )
+    val exactIdMatch = viewId in setOf(
+      "send_button", "chat_message_send", "button_send", "chat_send_button"
+    )
+    return labelMatch || exactIdMatch
   }
 
-  private fun isSendButton(node: AccessibilityNodeInfo): Boolean {
-    if (!node.isEnabled) return false
-    val textValue = node.text?.toString()?.trim().orEmpty()
-    val descriptionValue = node.contentDescription?.toString()?.trim().orEmpty()
-    val viewIdValue = node.viewIdResourceName.orEmpty()
-    val lowerText = textValue.lowercase()
-    val lowerDescription = descriptionValue.lowercase()
-    val lowerViewId = viewIdValue.lowercase()
-    val textLooksLikeSend = lowerText == "send" || lowerText == "전송" || lowerText == "보내기"
-    val descriptionLooksLikeSend = lowerDescription == "send" ||
-      lowerDescription.contains("send message") || lowerDescription.contains("전송") || lowerDescription.contains("보내기")
-    val viewIdLooksLikeSend = lowerViewId.contains("send") ||
-      lowerViewId.contains("chat_message_send") || lowerViewId.contains("button_send")
-    val looksLikeSend = textLooksLikeSend || descriptionLooksLikeSend || viewIdLooksLikeSend
-    return looksLikeSend
+  private fun collectExactTelegramSendNodes(
+    node: AccessibilityNodeInfo?,
+    output: MutableList<AccessibilityNodeInfo>
+  ) {
+    if (node == null) return
+    if (isExactTelegramSendNode(node)) output.add(node)
+    for (index in 0 until node.childCount) {
+      collectExactTelegramSendNodes(node.getChild(index), output)
+    }
+  }
+
+  private fun clickTelegramSendButtonSafely(
+    roots: List<AccessibilityNodeInfo>,
+    editNode: AccessibilityNodeInfo?
+  ): Boolean {
+    val edit = editNode ?: return false
+    val editRect = Rect()
+    edit.getBoundsInScreen(editRect)
+    if (editRect.isEmpty()) return false
+
+    val candidates = mutableListOf<AccessibilityNodeInfo>()
+    roots.forEach { root ->
+      val rootRect = Rect()
+      root.getBoundsInScreen(rootRect)
+      if (
+        !rootRect.isEmpty() &&
+        rootRect.contains(editRect.centerX(), editRect.centerY())
+      ) {
+        collectExactTelegramSendNodes(root, candidates)
+      }
+    }
+    val verticalTolerance = maxOf(240, editRect.height().coerceAtLeast(1) * 3)
+    val target = candidates.mapNotNull { node ->
+      val rect = Rect()
+      node.getBoundsInScreen(rect)
+      if (
+        rect.isEmpty() ||
+        kotlin.math.abs(rect.centerY() - editRect.centerY()) > verticalTolerance
+      ) null else node to rect
+    }.minWithOrNull(
+      compareBy<Pair<AccessibilityNodeInfo, Rect>> {
+        kotlin.math.abs(it.second.centerY() - editRect.centerY())
+      }.thenByDescending { it.second.centerX() }
+    )?.first ?: return false
+
+    return clickNodeOrNearClickableParentSafely(target, ::isTelegramPackage)
   }
 
   private fun getAiRoots(): List<AccessibilityNodeInfo> {
@@ -3111,19 +2694,6 @@ override fun onServiceConnected() {
     return aiKeywords.any { lower.contains(it) }
   }
 
-  private fun clickNodeOrClickableParent(node: AccessibilityNodeInfo?): Boolean {
-    if (node == null) return false
-    if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-    var parent = node.parent
-    var depth = 0
-    while (parent != null && depth < 5) {
-      if (parent.isClickable && parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-      parent = parent.parent
-      depth += 1
-    }
-    return false
-  }
-
   private fun performImeEnterIfPossible(node: AccessibilityNodeInfo?): Boolean {
     if (node == null) return false
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -3133,52 +2703,70 @@ override fun onServiceConnected() {
     }
   }
 
-  private fun clickAiSendButton(roots: List<AccessibilityNodeInfo>): Boolean {
-    roots.forEach { root ->
-      val btn = findAiSendButton(root)
-      if (btn != null) return clickNodeOrClickableParent(btn)
-    }
-    return false
-  }
-
-  private fun findAiSendButton(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-    if (node == null) return null
-    if (isAiSendButton(node)) return node
-    for (i in 0 until node.childCount) {
-      val found = findAiSendButton(node.getChild(i))
-      if (found != null) return found
-    }
-    return null
-  }
-
-  private fun isAiSendButton(node: AccessibilityNodeInfo): Boolean {
+  private fun isExactChatGptSendNode(node: AccessibilityNodeInfo): Boolean {
     if (!node.isEnabled) return false
+    if (!isChatGptPackageForTgToGpt(node.packageName?.toString().orEmpty())) {
+      return false
+    }
 
-    val text = node.text?.toString()?.trim().orEmpty()
-    val desc = node.contentDescription?.toString()?.trim().orEmpty()
-    val viewId = node.viewIdResourceName.orEmpty()
+    val labels = listOf(
+      normalizeExactControlLabel(node.text),
+      normalizeExactControlLabel(node.contentDescription)
+    )
+    return labels.any { label ->
+      label == "send" ||
+        label == "send message" ||
+        label == "submit" ||
+        label == "전송" ||
+        label == "보내기" ||
+        label == "메시지 보내기"
+    }
+  }
 
-    val lowerText = text.lowercase()
-    val lowerDesc = desc.lowercase()
-    val lowerViewId = viewId.lowercase()
+  private fun collectExactChatGptSendNodes(
+    node: AccessibilityNodeInfo?,
+    output: MutableList<AccessibilityNodeInfo>
+  ) {
+    if (node == null) return
+    if (isExactChatGptSendNode(node)) output.add(node)
+    for (index in 0 until node.childCount) {
+      collectExactChatGptSendNodes(node.getChild(index), output)
+    }
+  }
 
-    val descLooksLike = lowerDesc.contains("send") ||
-      lowerDesc.contains("submit") ||
-      lowerDesc.contains("전송") ||
-      lowerDesc.contains("보내기") ||
-      lowerDesc.contains("메시지 보내기")
+  private fun findExactChatGptSendNearComposer(
+    roots: List<AccessibilityNodeInfo>,
+    editNode: AccessibilityNodeInfo?
+  ): AccessibilityNodeInfo? {
+    val edit = editNode ?: return null
+    val editRect = Rect()
+    edit.getBoundsInScreen(editRect)
+    if (editRect.isEmpty()) return null
 
-    val viewIdLooksLike = lowerViewId.contains("send") ||
-      lowerViewId.contains("submit")
-
-    val textExact = lowerText == "send" ||
-      lowerText == "submit" ||
-      lowerText == "전송" ||
-      lowerText == "보내기"
-
-    val looksLikeSend = descLooksLike || viewIdLooksLike || textExact
-
-    return looksLikeSend
+    val candidates = mutableListOf<AccessibilityNodeInfo>()
+    roots.forEach { root ->
+      val rootRect = Rect()
+      root.getBoundsInScreen(rootRect)
+      if (
+        !rootRect.isEmpty() &&
+        rootRect.contains(editRect.centerX(), editRect.centerY())
+      ) {
+        collectExactChatGptSendNodes(root, candidates)
+      }
+    }
+    val verticalTolerance = maxOf(240, editRect.height().coerceAtLeast(1) * 3)
+    return candidates.mapNotNull { node ->
+      val rect = Rect()
+      node.getBoundsInScreen(rect)
+      if (
+        rect.isEmpty() ||
+        kotlin.math.abs(rect.centerY() - editRect.centerY()) > verticalTolerance
+      ) null else node to rect
+    }.minWithOrNull(
+      compareBy<Pair<AccessibilityNodeInfo, Rect>> {
+        kotlin.math.abs(it.second.centerY() - editRect.centerY())
+      }.thenByDescending { it.second.centerX() }
+    )?.first
   }
 
    private fun copyGptOutputByChatGptButton(
@@ -3211,7 +2799,7 @@ override fun onServiceConnected() {
     val sentinel = "__COPYBRIDGE_COPY_SENTINEL_${System.currentTimeMillis()}"
     copyToClipboard(sentinel)
 
-    val clicked = clickNodeOrClickableParent(target.node)
+    val clicked = clickExactGptCopyCandidate(target)
     appendDebugLog("GPT\u2192TG", "COPY_BUTTON clicked=$clicked")
     if (!clicked) return null
 
@@ -3261,16 +2849,23 @@ override fun onServiceConnected() {
       .trim()
 
     if (!rect.isEmpty() && label.isNotBlank() && node.isEnabled) {
-      val lower = label.lowercase()
-
-      val isCodeCopy =
-        lower == "코드 복사" ||
-        lower.contains("code copy") ||
-        lower.contains("copy code")
-
-      val isAnswerCopy =
-        lower == "복사" ||
-        lower == "copy"
+      val labels = listOf(
+        normalizeExactControlLabel(node.text),
+        normalizeExactControlLabel(node.contentDescription)
+      )
+      val isCodeCopy = labels.any { value ->
+        value == "코드 복사" ||
+          value == "copy code" ||
+          value == "code copy" ||
+          value == "코드 복사 버튼" ||
+          value == "copy code button"
+      }
+      val isAnswerCopy = labels.any { value ->
+        value == "복사" ||
+          value == "copy" ||
+          value == "복사 버튼" ||
+          value == "copy button"
+      }
 
       if (isCodeCopy || isAnswerCopy) {
         output.add(
@@ -3288,6 +2883,19 @@ override fun onServiceConnected() {
     for (i in 0 until node.childCount) {
       collectGptCopyButtonCandidates(node.getChild(i), output)
     }
+  }
+
+  private fun clickExactGptCopyCandidate(
+    candidate: CopyButtonCandidate
+  ): Boolean {
+    val node = candidate.node
+    if (!isChatGptPackageForTgToGpt(node.packageName?.toString().orEmpty())) {
+      return false
+    }
+    return clickNodeOrNearClickableParentSafely(
+      node,
+      ::isChatGptPackageForTgToGpt
+    )
   }
 
     private fun isTelegramEditActuallyFilled(
@@ -3317,86 +2925,6 @@ override fun onServiceConnected() {
     sorted.takeLast(12).forEachIndexed { index, candidate ->
       appendDebugLog("GPT→TG", "$label candidate[$index] label=${compactLogPreview(candidate.label)} top=${candidate.top} left=${candidate.left} isCode=${candidate.isCodeCopy}")
     }
-  }
-
-    private fun tapNodeCenterByGesture(
-    node: AccessibilityNodeInfo?,
-    logLabel: String
-  ): Boolean {
-    if (node == null) { appendDebugLog("GPT\u2192TG", "$logLabel gestureTap node=null"); return false }
-    val rect = android.graphics.Rect()
-    node.getBoundsInScreen(rect)
-    if (rect.width() <= 0 || rect.height() <= 0) { appendDebugLog("GPT\u2192TG", "$logLabel gestureTap invalidBounds left=${rect.left} top=${rect.top} right=${rect.right} bottom=${rect.bottom}"); return false }
-    val centerX = rect.centerX().toFloat()
-    val centerY = rect.centerY().toFloat()
-    val path = android.graphics.Path()
-    path.moveTo(centerX, centerY)
-    val gesture = android.accessibilityservice.GestureDescription.Builder()
-      .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0L, 80L))
-      .build()
-    val dispatched = dispatchGesture(gesture, null, null)
-    appendDebugLog("GPT\u2192TG", "$logLabel gestureTap dispatched=$dispatched centerX=${centerX.toInt()} centerY=${centerY.toInt()} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}")
-    return dispatched
-  }
-
-    private fun tryTelegramLongClickPaste(
-    editNode: AccessibilityNodeInfo?
-  ): Boolean {
-    if (editNode == null) return false
-    appendDebugLog("GPT→TG", "CODE_LONG_PASTE start")
-    editNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-    editNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-    android.os.SystemClock.sleep(250L)
-    val longClicked = editNode.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
-    appendDebugLog("GPT→TG", "CODE_LONG_PASTE longClicked=$longClicked")
-    android.os.SystemClock.sleep(500L)
-    val roots = getTelegramRoots()
-    val pasteCandidates = mutableListOf<AccessibilityNodeInfo>()
-    roots.forEach { root -> collectPasteMenuCandidates(root, pasteCandidates) }
-    appendDebugLog("GPT→TG", "CODE_LONG_PASTE menuCandidates=${pasteCandidates.size}")
-    pasteCandidates.take(8).forEachIndexed { index, candidate -> logPasteMenuCandidate(index, candidate) }
-    val target = pasteCandidates.firstOrNull()
-    if (target == null) { appendDebugLog("GPT→TG", "CODE_LONG_PASTE target=null"); return false }
-    appendDebugLog("GPT→TG", "CODE_LONG_PASTE target=${compactLogPreview(buildNodeLabel(target))}")
-    val clicked = clickNodeOrClickableParent(target)
-    appendDebugLog("GPT→TG", "CODE_LONG_PASTE clicked=$clicked")
-    if (!clicked) return false
-    android.os.SystemClock.sleep(500L)
-    val valid = isTelegramEditActuallyFilled(editNode)
-    appendDebugLog("GPT→TG", "CODE_LONG_PASTE valid=$valid")
-    logTelegramEditSnapshot("CODE_LONG_PASTE_SNAPSHOT", editNode)
-    return valid
-  }
-
-  private fun isExactPasteMenuLabel(
-    label: String
-  ): Boolean {
-    val normalized = label.trim()
-    val lower = normalized.lowercase()
-    if (normalized.length > 20) return false
-    return normalized == "붙여넣기" || lower == "paste"
-  }
-
-  private fun logPasteMenuCandidate(
-    index: Int,
-    node: AccessibilityNodeInfo
-  ) {
-    val label = buildNodeLabel(node)
-    val rect = android.graphics.Rect()
-    node.getBoundsInScreen(rect)
-    appendDebugLog("GPT→TG", "CODE_LONG_PASTE candidate[$index] label=${compactLogPreview(label)} length=${label.length} class=${node.className} clickable=${node.isClickable} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}")
-  }
-
-  private fun collectPasteMenuCandidates(
-    node: AccessibilityNodeInfo?,
-    out: MutableList<AccessibilityNodeInfo>
-  ) {
-    if (node == null) return
-    val label = buildNodeLabel(node).trim()
-    if (isExactPasteMenuLabel(label)) {
-      out.add(node)
-    }
-    for (i in 0 until node.childCount) { collectPasteMenuCandidates(node.getChild(i), out) }
   }
 
   private fun buildNodeLabel(node: AccessibilityNodeInfo?): String {
@@ -3440,27 +2968,7 @@ override fun onServiceConnected() {
 
     }
 
-    val clicked = if (gptOutputMode == "CODE") {
-      val gestureClicked = tapNodeCenterByGesture(target.node, "CODE_COPY_BUTTON")
-      appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE codeGestureClicked=$gestureClicked")
-      if (gestureClicked) { true } else {
-        val fallbackClicked = clickNodeOrClickableParent(target.node)
-        appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE codeFallbackClick=$fallbackClicked")
-        fallbackClicked
-      }
-    } else if (gptOutputMode == "FULL") {
-      val gestureClicked = tapNodeCenterByGesture(target.node, "FULL_COPY_BUTTON")
-      appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE fullGestureClicked=$gestureClicked")
-      if (gestureClicked) { true } else {
-        val fallbackClicked = clickNodeOrClickableParent(target.node)
-        appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE fullFallbackClick=$fallbackClicked")
-        fallbackClicked
-      }
-    } else {
-      val defaultClicked = clickNodeOrClickableParent(target.node)
-      appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE defaultClick=$defaultClicked")
-      defaultClicked
-    }
+    val clicked = clickExactGptCopyCandidate(target)
     appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE clicked=$clicked")
     if (!clicked) return false
     android.os.SystemClock.sleep(900L)
@@ -3475,1133 +2983,28 @@ override fun onServiceConnected() {
       val copiedTextBeforePaste = readClipboardText()
       val dedupedTextBeforePaste = dedupeTelegramSendTextFinal(copiedTextBeforePaste)
 
-                        if (copiedTextBeforePaste.isBlank()) {
+      if (copiedTextBeforePaste.isBlank()) {
         appendDebugLog(
           "GPT→TG",
-          "COPY_BUTTON_FULL_BLANK_CLIPBOARD_TRY_DIRECT_PASTE telegramEdit=true autoSend=$autoSend"
+          "COPY_BUTTON_FULL_CLIPBOARD_EMPTY_NO_GESTURE"
         )
+        val extractedText = pickLatestGptAnswerTextForFullFallback(aiRoots).trim()
+        if (extractedText.isBlank()) return false
 
-        val targetRect = android.graphics.Rect()
-        target.node.getBoundsInScreen(targetRect)
-
-        val tapAttempts = listOf(
-          Triple("center", 0, 0),
-          Triple("upper", 0, -18),
-          Triple("lower", 0, 18)
-        )
-
+        val setTextOk = setTextToNode(tgEdit, extractedText)
+        android.os.SystemClock.sleep(220L)
+        val setVerified = setTextOk && isTelegramEditActuallyFilled(tgEdit)
         appendDebugLog(
           "GPT→TG",
-          "COPY_BUTTON_FULL_MULTI_TAP_START attempts=${tapAttempts.size} targetBounds=${targetRect.left},${targetRect.top},${targetRect.right},${targetRect.bottom} autoSend=$autoSend"
+          "GPT_TEXTVIEW_EXTRACT_SAFE_SET result=$setTextOk verified=$setVerified length=${extractedText.length}"
         )
+        if (!setVerified) return false
 
-        var lastInvalidReason = "notStarted"
-        var lastPastedPreview = ""
-        var lastPastedLength = 0
-
-        tapAttempts.forEachIndexed { attemptIndex, attempt ->
-          val attemptName = attempt.first
-          val offsetX = attempt.second
-          val offsetY = attempt.third
-
-          copyToClipboard(fullPasteSentinel)
-          android.os.SystemClock.sleep(90L)
-
-          val tapX = (targetRect.centerX() + offsetX).coerceIn(targetRect.left + 4, targetRect.right - 4).toFloat()
-          val tapY = (targetRect.centerY() + offsetY).coerceIn(targetRect.top + 4, targetRect.bottom - 4).toFloat()
-
-          val tapPath = android.graphics.Path().apply {
-            moveTo(tapX, tapY)
-          }
-
-          val tapGesture = android.accessibilityservice.GestureDescription.Builder()
-            .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(tapPath, 0L, 80L))
-            .build()
-
-          val tapDispatched = dispatchGesture(tapGesture, null, null)
-
-          appendDebugLog(
-            "GPT→TG",
-            "COPY_BUTTON_FULL_MULTI_TAP_GESTURE attempt=${attemptIndex + 1} name=$attemptName dispatched=$tapDispatched tapX=${tapX.toInt()} tapY=${tapY.toInt()} sentinelLength=${fullPasteSentinel.length}"
-          )
-
-          android.os.SystemClock.sleep(420L)
-
-          val clearBeforeDirectPasteOk = try {
-            setTextToNode(tgEdit, "")
-          } catch (error: Exception) {
-            appendDebugLog(
-              "GPT→TG",
-              "COPY_BUTTON_FULL_MULTI_TAP_CLEAR_BEFORE_EXCEPTION attempt=${attemptIndex + 1} ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
-            )
-            false
-          }
-
-          appendDebugLog(
-            "GPT→TG",
-            "COPY_BUTTON_FULL_MULTI_TAP_CLEAR_BEFORE attempt=${attemptIndex + 1} result=$clearBeforeDirectPasteOk"
-          )
-
-          val directPasteOk = try {
-            tgEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-            tgEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            android.os.SystemClock.sleep(180L)
-            pasteClipboardToNode(tgEdit)
-          } catch (error: Exception) {
-            appendDebugLog(
-              "GPT→TG",
-              "COPY_BUTTON_FULL_MULTI_TAP_PASTE_EXCEPTION attempt=${attemptIndex + 1} ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
-            )
-            false
-          }
-
-          var directPastedText = ""
-          if (directPasteOk) {
-            android.os.SystemClock.sleep(260L)
-            try {
-              tgEdit.refresh()
-            } catch (_: Exception) {
-            }
-            directPastedText = tgEdit.text?.toString()?.trim().orEmpty()
-          }
-
-          val directPasteContainsSentinel = directPastedText.contains(fullPasteSentinel)
-          val directPasteTooShort = directPastedText.trim().length < 20
-          val directPasteValid = directPasteOk &&
-            directPastedText.isNotBlank() &&
-            !directPasteContainsSentinel &&
-            !directPasteTooShort
-
-          lastPastedLength = directPastedText.length
-          lastPastedPreview = compactLogPreview(directPastedText)
-          lastInvalidReason = if (directPasteContainsSentinel) {
-            "sentinel"
-          } else if (directPasteTooShort) {
-            "tooShort"
-          } else if (!directPasteOk) {
-            "pasteFailed"
-          } else {
-            "blankOrUnknown"
-          }
-
-          appendDebugLog(
-            "GPT→TG",
-            "COPY_BUTTON_FULL_MULTI_TAP_VALIDATION attempt=${attemptIndex + 1} name=$attemptName pasteResult=$directPasteOk valid=$directPasteValid pastedLength=${directPastedText.length} containsSentinel=$directPasteContainsSentinel tooShort=$directPasteTooShort reason=$lastInvalidReason preview=${compactLogPreview(directPastedText)}"
-          )
-
-          if (directPasteValid) {
-            appendDebugLog(
-              "GPT→TG",
-              "COPY_BUTTON_FULL_MULTI_TAP_VALIDATED attempt=${attemptIndex + 1} name=$attemptName autoSend=$autoSend textLength=${directPastedText.length}"
-            )
-
-            if (autoSend) {
-              scheduleAutoSendAfterPaste("GPT→TG_FULL_MULTI_TAP_VALIDATED", tgEdit)
-            } else {
-              Toast.makeText(this, "Telegram 입력창에 붙여넣었습니다.", Toast.LENGTH_SHORT).show()
-            }
-            return true
-          }
-
-          val clearInvalidPasteOk = try {
-            setTextToNode(tgEdit, "")
-          } catch (error: Exception) {
-            appendDebugLog(
-              "GPT→TG",
-              "COPY_BUTTON_FULL_MULTI_TAP_CLEAR_INVALID_EXCEPTION attempt=${attemptIndex + 1} ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
-            )
-            false
-          }
-
-          appendDebugLog(
-            "GPT→TG",
-            "COPY_BUTTON_FULL_MULTI_TAP_INVALID_CLEARED attempt=${attemptIndex + 1} result=$clearInvalidPasteOk reason=$lastInvalidReason"
-          )
-        }
-
-        appendDebugLog(
-          "GPT→TG",
-          "COPY_BUTTON_FULL_MULTI_TAP_INVALID_STOP attempts=${tapAttempts.size} reason=$lastInvalidReason fallbackBlocked=true autoSendBlocked=true lastPastedLength=$lastPastedLength lastPreview=$lastPastedPreview"
-        )
-
-        appendDebugLog(
-          "GPT→TG",
-          "GPT_TEXTVIEW_EXTRACT_START reason=multiTapInvalid aiRoots=${aiRoots.size} autoSend=$autoSend"
-        )
-
-        data class GptTextViewCandidate(
-          val text: String,
-          val rect: android.graphics.Rect,
-          val className: String,
-          val packageName: String,
-          val score: Int
-        )
-
-        val textViewCandidates = mutableListOf<GptTextViewCandidate>()
-        var textViewInspectCount = 0
-        var textViewRejectLogCount = 0
-        var textViewAcceptLogCount = 0
-
-        fun collectGptTextViewCandidates(node: AccessibilityNodeInfo) {
-          // node is non-null per signature
-
-          val rect = android.graphics.Rect()
-          try {
-            node.getBoundsInScreen(rect)
-          } catch (_: Exception) {
-          }
-
-          val label = buildNodeLabel(node).trim()
-          val className = node.className?.toString().orEmpty()
-          val packageName = node.packageName?.toString().orEmpty()
-          val lowerLabel = label.lowercase()
-
-          val isTextView = className.contains("TextView", ignoreCase = true)
-          val isGptPackage = packageName == "com.openai.chatgpt"
-          val longEnough = label.length >= 20
-          val visible = !rect.isEmpty() && rect.top >= 0
-          val notTinyButton = rect.width() >= 260 && rect.height() >= 40
-          val aboveActionRow = rect.bottom <= targetRect.top + 24
-          val notTopHeader = rect.bottom > 180
-          val notInputArea = rect.top < 930
-          val exactUiLabel =
-            label == "복사" ||
-            label == "공유" ||
-            label == "더 많은 액션" ||
-            label == "소리 내어 읽기" ||
-            label == "ChatGPT에게 답장" ||
-            label == "첨부 파일" ||
-            label == "음성 받아쓰기" ||
-            label == "음성 대화 시작" ||
-            label == "Openclaw" ||
-            label == "5.5 높음" ||
-            label == "위로 이동"
-
-          val shortUiLikeLabel = label.length <= 24 && (
-            lowerLabel.contains("chatgpt에게 답장") ||
-            lowerLabel.contains("첨부 파일") ||
-            lowerLabel.contains("음성 받아쓰기") ||
-            lowerLabel.contains("음성 대화") ||
-            lowerLabel.contains("위로 이동")
-          )
-
-          val notUiLabel = !(exactUiLabel || shortUiLikeLabel)
-
-          val looksLikeInstructionOrAnswer = label.contains(" ") ||
-            label.contains("\n") ||
-            label.contains("-") ||
-            label.contains(":") ||
-            label.contains("단계") ||
-            label.contains("문제") ||
-            label.contains("목적") ||
-            label.contains("질문") ||
-            label.contains("로그") ||
-            label.length >= 60
-
-          val rejectReasons = mutableListOf<String>()
-          if (!isTextView) rejectReasons.add("notTextView")
-          if (!isGptPackage) rejectReasons.add("notGptPackage:$packageName")
-          if (!longEnough) rejectReasons.add("tooShort:${label.length}")
-          if (!visible) rejectReasons.add("notVisible")
-          if (!notTinyButton) rejectReasons.add("tiny:${rect.width()}x${rect.height()}")
-          if (!aboveActionRow) rejectReasons.add("notAboveActionRow:${rect.bottom}>${targetRect.top + 24}")
-          if (!notTopHeader) rejectReasons.add("topHeader:${rect.bottom}")
-          if (!notInputArea) rejectReasons.add("inputArea:${rect.top}")
-          if (!notUiLabel) rejectReasons.add("uiLabel")
-          if (!looksLikeInstructionOrAnswer) rejectReasons.add("notAnswerLike")
-
-          val accepted = isTextView && isGptPackage && longEnough && visible && notTinyButton && aboveActionRow && notTopHeader && notInputArea && notUiLabel && looksLikeInstructionOrAnswer
-
-          if (isTextView && isGptPackage && label.isNotBlank()) {
-            textViewInspectCount += 1
-            if (!accepted && textViewRejectLogCount < 12) {
-              appendDebugLog(
-                "GPT→TG",
-                "GPT_TEXTVIEW_EXTRACT_REJECT[$textViewRejectLogCount] inspect=$textViewInspectCount reasons=${rejectReasons.joinToString("|")} length=${label.length} class=$className bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} preview=${compactLogPreview(label)}"
-              )
-              textViewRejectLogCount += 1
-            }
-          }
-
-          if (accepted) {
-            var score = 0
-            score += label.length.coerceAtMost(1200)
-            score += rect.width() / 4
-            score += rect.height() / 2
-            if (rect.left <= 80 && rect.right >= 760) score += 300
-            if (rect.bottom <= targetRect.top) score += 200
-            if (rect.top < targetRect.top && rect.bottom > 220) score += 120
-
-            textViewCandidates.add(
-              GptTextViewCandidate(
-                text = label,
-                rect = rect,
-                className = className,
-                packageName = packageName,
-                score = score
-              )
-            )
-            if (textViewAcceptLogCount < 8) {
-              appendDebugLog(
-                "GPT→TG",
-                "GPT_TEXTVIEW_EXTRACT_ACCEPT[$textViewAcceptLogCount] score=$score length=${label.length} class=$className bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} preview=${compactLogPreview(label)}"
-              )
-              textViewAcceptLogCount += 1
-            }
-          }
-
-          for (childIndex in 0 until node.childCount) {
-            collectGptTextViewCandidates(node.getChild(childIndex) ?: return)
-          }
-        }
-
-        aiRoots.forEach { root ->
-          collectGptTextViewCandidates(root ?: return@forEach)
-        }
-
-        appendDebugLog(
-          "GPT→TG",
-          "GPT_TEXTVIEW_EXTRACT_CANDIDATES count=${textViewCandidates.size}"
-        )
-
-        textViewCandidates
-          .sortedWith(
-            compareByDescending<GptTextViewCandidate> { it.score }
-              .thenByDescending { it.text.length }
-          )
-          .take(8)
-          .forEachIndexed { index, candidate ->
-            appendDebugLog(
-              "GPT→TG",
-              "GPT_TEXTVIEW_EXTRACT_CANDIDATE[$index] score=${candidate.score} length=${candidate.text.length} class=${candidate.className} package=${candidate.packageName} bounds=${candidate.rect.left},${candidate.rect.top},${candidate.rect.right},${candidate.rect.bottom} preview=${compactLogPreview(candidate.text)}"
-            )
-          }
-
-        val selectedTextViewCandidate = textViewCandidates
-          .sortedWith(
-            compareByDescending<GptTextViewCandidate> { it.score }
-              .thenByDescending { it.text.length }
-          )
-          .firstOrNull()
-
-        if (selectedTextViewCandidate != null) {
-          val extractedText = selectedTextViewCandidate.text.trim()
-          val validExtractedText =
-            extractedText.length >= 20 &&
-            !extractedText.contains(fullPasteSentinel) &&
-            extractedText != "Openclaw" &&
-            extractedText != "5.5 높음"
-
-          appendDebugLog(
-            "GPT→TG",
-            "GPT_TEXTVIEW_EXTRACT_SELECTED valid=$validExtractedText score=${selectedTextViewCandidate.score} length=${extractedText.length} bounds=${selectedTextViewCandidate.rect.left},${selectedTextViewCandidate.rect.top},${selectedTextViewCandidate.rect.right},${selectedTextViewCandidate.rect.bottom} preview=${compactLogPreview(extractedText)}"
-          )
-
-          if (validExtractedText) {
-            val clearBeforeTextViewOk = try {
-              setTextToNode(tgEdit, "")
-            } catch (error: Exception) {
-              appendDebugLog(
-                "GPT→TG",
-                "GPT_TEXTVIEW_EXTRACT_CLEAR_EXCEPTION ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
-              )
-              false
-            }
-
-            appendDebugLog(
-              "GPT→TG",
-              "GPT_TEXTVIEW_EXTRACT_CLEAR_BEFORE result=$clearBeforeTextViewOk"
-            )
-
-            val setTextOk = try {
-              setTextToNode(tgEdit, extractedText)
-            } catch (error: Exception) {
-              appendDebugLog(
-                "GPT→TG",
-                "GPT_TEXTVIEW_EXTRACT_SET_EXCEPTION ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
-              )
-              false
-            }
-
-            android.os.SystemClock.sleep(220L)
-
-            var telegramInputText = ""
-            try {
-              tgEdit.refresh()
-              telegramInputText = tgEdit.text?.toString()?.trim().orEmpty()
-            } catch (_: Exception) {
-            }
-
-            val setVerified = setTextOk &&
-              telegramInputText.isNotBlank() &&
-              telegramInputText.contains(extractedText.take(20))
-
-            appendDebugLog(
-              "GPT→TG",
-              "GPT_TEXTVIEW_EXTRACT_SET_RESULT setTextOk=$setTextOk verified=$setVerified inputLength=${telegramInputText.length} autoSend=$autoSend preview=${compactLogPreview(telegramInputText)}"
-            )
-
-            if (setVerified) {
-              if (autoSend) {
-                appendDebugLog(
-                  "GPT→TG",
-                  "GPT_TEXTVIEW_EXTRACT_AUTOSEND_START inputLength=${telegramInputText.length} schedule=true directFallback=true"
-                )
-
-                scheduleAutoSendAfterPaste("GPT→TG_FULL_TEXTVIEW_EXTRACT", tgEdit)
-
-                var textViewDirectSendCompleted = false
-                val textViewDirectSendExpectedPrefix = extractedText.take(20)
-
-                fun attemptTextViewExtractDirectSend(reason: String) {
-                  if (textViewDirectSendCompleted) {
-                    appendDebugLog(
-                      "GPT→TG",
-                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_SKIP_COMPLETED reason=$reason"
-                    )
-                    return
-                  }
-
-                  val editRect = android.graphics.Rect()
-                  try {
-                    tgEdit.getBoundsInScreen(editRect)
-                  } catch (_: Exception) {
-                  }
-
-                  var currentInputText = ""
-                  try {
-                    tgEdit.refresh()
-                    currentInputText = tgEdit.text?.toString()?.trim().orEmpty()
-                  } catch (_: Exception) {
-                  }
-
-                  appendDebugLog(
-                    "GPT→TG",
-                    "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_ATTEMPT reason=$reason inputLength=${currentInputText.length} editBounds=${editRect.left},${editRect.top},${editRect.right},${editRect.bottom}"
-                  )
-
-                  val currentInputIsPlaceholder =
-                    currentInputText == "메시지" ||
-                    currentInputText.equals("Message", ignoreCase = true) ||
-                    currentInputText.equals("Write a message", ignoreCase = true)
-
-                  val currentInputMatchesExpected =
-                    currentInputText.contains(textViewDirectSendExpectedPrefix)
-
-                  if (
-                    currentInputText.isBlank() ||
-                    currentInputIsPlaceholder ||
-                    !currentInputMatchesExpected
-                  ) {
-                    appendDebugLog(
-                      "GPT→TG",
-                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_DONE reason=$reason result=skipped inputReady=false inputBlank=${currentInputText.isBlank()} placeholder=$currentInputIsPlaceholder matchesExpected=$currentInputMatchesExpected expectedPrefix=${compactLogPreview(textViewDirectSendExpectedPrefix)} preview=${compactLogPreview(currentInputText)}"
-                    )
-                    return
-                  }
-
-                  data class TelegramSendCandidate(
-                    val node: AccessibilityNodeInfo,
-                    val label: String,
-                    val rect: android.graphics.Rect,
-                    val score: Int
-                  )
-
-                  val candidates = mutableListOf<TelegramSendCandidate>()
-
-                  fun collectTelegramSendCandidates(node: AccessibilityNodeInfo) {
-                    val packageName = node.packageName?.toString().orEmpty()
-                    val label = buildNodeLabel(node).trim()
-                    val lowerLabel = label.lowercase()
-                    val rect = android.graphics.Rect()
-                    try {
-                      node.getBoundsInScreen(rect)
-                    } catch (_: Exception) {
-                    }
-
-                    val isTelegram = packageName == "org.telegram.messenger"
-                    val visible = !rect.isEmpty() && rect.top >= 0
-                    val labelLooksSend =
-                      label == "보내기" ||
-                      label == "전송" ||
-                      label.equals("Send", ignoreCase = true) ||
-                      lowerLabel == "send" ||
-                      lowerLabel.contains("send message")
-
-                    val excluded =
-                      lowerLabel.contains("음성") ||
-                      lowerLabel.contains("녹음") ||
-                      lowerLabel.contains("첨부") ||
-                      lowerLabel.contains("미디어") ||
-                      lowerLabel.contains("이모지") ||
-                      lowerLabel.contains("스티커") ||
-                      lowerLabel.contains("gif")
-
-                    val nearInputRow = if (!editRect.isEmpty()) {
-                      rect.centerY() >= editRect.top - 140 && rect.centerY() <= editRect.bottom + 160
-                    } else {
-                      rect.bottom >= 1850
-                    }
-
-                    val rightOfInput = if (!editRect.isEmpty()) {
-                      rect.centerX() >= editRect.right
-                    } else {
-                      rect.left >= 700
-                    }
-
-                    val smallButton =
-                      rect.width() in 36..190 &&
-                      rect.height() in 36..190
-
-                    val blankRightButton =
-                      label.isBlank() &&
-                      nearInputRow &&
-                      rightOfInput &&
-                      smallButton
-
-                    if (isTelegram && visible && !excluded && (labelLooksSend || blankRightButton)) {
-                      var score = 0
-                      if (labelLooksSend) score += 1000
-                      if (blankRightButton) score += 300
-                      if (nearInputRow) score += 250
-                      if (rightOfInput) score += 200
-                      if (node.isClickable) score += 120
-                      score += rect.left.coerceAtLeast(0) / 10
-
-                      candidates.add(
-                        TelegramSendCandidate(
-                          node = node,
-                          label = label,
-                          rect = rect,
-                          score = score
-                        )
-                      )
-                    }
-
-                    for (childIndex in 0 until node.childCount) {
-                      collectTelegramSendCandidates(node.getChild(childIndex) ?: return)
-                    }
-                  }
-
-                  val telegramRootsForSend = try {
-                    windows
-                      ?.mapNotNull { window ->
-                        try {
-                          window.root
-                        } catch (_: Exception) {
-                          null
-                        }
-                      }
-                      ?.filter { root ->
-                        root.packageName?.toString() == "org.telegram.messenger"
-                      }
-                      ?: emptyList()
-                  } catch (_: Exception) {
-                    emptyList()
-                  }
-
-                  telegramRootsForSend.forEach { root ->
-                    collectTelegramSendCandidates(root)
-                  }
-
-                  val sortedCandidates = candidates.sortedWith(
-                    compareByDescending<TelegramSendCandidate> { it.score }
-                      .thenByDescending { it.rect.left }
-                  )
-
-                  appendDebugLog(
-                    "GPT→TG",
-                    "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_CANDIDATES reason=$reason count=${sortedCandidates.size} telegramRoots=${telegramRootsForSend.size}"
-                  )
-
-                  sortedCandidates.take(8).forEachIndexed { index, candidate ->
-                    appendDebugLog(
-                      "GPT→TG",
-                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_CANDIDATE[$index] reason=$reason score=${candidate.score} label=${compactLogPreview(candidate.label)} class=${candidate.node.className} clickable=${candidate.node.isClickable} bounds=${candidate.rect.left},${candidate.rect.top},${candidate.rect.right},${candidate.rect.bottom}"
-                    )
-                  }
-
-                  val targetSend = sortedCandidates.firstOrNull()
-                  if (targetSend == null) {
-                    appendDebugLog(
-                      "GPT→TG",
-                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_DONE reason=$reason result=noCandidate"
-                    )
-                    return
-                  }
-
-                  val clickChain = mutableListOf<AccessibilityNodeInfo>()
-                  var chainNode: AccessibilityNodeInfo? = targetSend.node
-                  while (chainNode != null && clickChain.size < 5) {
-                    clickChain.add(chainNode)
-                    chainNode = try {
-                      chainNode.parent
-                    } catch (_: Exception) {
-                      null
-                    }
-                  }
-
-                  var actionClickSuccess = false
-                  var actionClickIndex = -1
-
-                  for ((index, node) in clickChain.withIndex()) {
-                    val nodeRect = android.graphics.Rect()
-                    try {
-                      node.getBoundsInScreen(nodeRect)
-                    } catch (_: Exception) {
-                    }
-
-                    val clickResult = try {
-                      node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    } catch (error: Exception) {
-                      appendDebugLog(
-                        "GPT→TG",
-                        "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_ACTION_CLICK_EXCEPTION reason=$reason index=$index ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
-                      )
-                      false
-                    }
-
-                    appendDebugLog(
-                      "GPT→TG",
-                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_ACTION_CLICK reason=$reason index=$index result=$clickResult label=${compactLogPreview(buildNodeLabel(node))} class=${node.className} clickable=${node.isClickable} bounds=${nodeRect.left},${nodeRect.top},${nodeRect.right},${nodeRect.bottom}"
-                    )
-
-                    if (clickResult) {
-                      actionClickSuccess = true
-                      actionClickIndex = index
-                      break
-                    }
-                  }
-
-                    var gestureDispatchedForDirectSend = false
-
-                    if (!actionClickSuccess) {
-                      val tapX = targetSend.rect.centerX().toFloat()
-                      val tapY = targetSend.rect.centerY().toFloat()
-                      val tapPath = android.graphics.Path().apply {
-                        moveTo(tapX, tapY)
-                      }
-                      val tapGesture = android.accessibilityservice.GestureDescription.Builder()
-                        .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(tapPath, 0L, 90L))
-                        .build()
-                      gestureDispatchedForDirectSend = dispatchGesture(tapGesture, null, null)
-
-                      appendDebugLog(
-                        "GPT→TG",
-                        "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_GESTURE reason=$reason dispatched=$gestureDispatchedForDirectSend label=${compactLogPreview(targetSend.label)} bounds=${targetSend.rect.left},${targetSend.rect.top},${targetSend.rect.right},${targetSend.rect.bottom} tapX=${tapX.toInt()} tapY=${tapY.toInt()}"
-                      )
-                    }
-
-                    val directGestureSuccess = !actionClickSuccess && gestureDispatchedForDirectSend
-                    if (actionClickSuccess || directGestureSuccess) {
-                      textViewDirectSendCompleted = true
-                    }
-
-                    appendDebugLog(
-                      "GPT→TG",
-                      "GPT_TEXTVIEW_EXTRACT_DIRECT_SEND_DONE reason=$reason result=attempted actionClickSuccess=$actionClickSuccess actionClickIndex=$actionClickIndex gestureSuccess=$directGestureSuccess completed=$textViewDirectSendCompleted candidateLabel=${compactLogPreview(targetSend.label)}"
-                    )
-                  }
-
-                val directSendHandler = android.os.Handler(android.os.Looper.getMainLooper())
-                listOf(
-                  450L to "textview_direct_450",
-                  1100L to "textview_direct_1100",
-                  1800L to "textview_direct_1800"
-                ).forEach { pair ->
-                  directSendHandler.postDelayed({
-                    attemptTextViewExtractDirectSend(pair.second)
-                  }, pair.first)
-                }
-              } else {
-                Toast.makeText(this, "Telegram 입력창에 GPT 화면 텍스트를 넣었습니다.", Toast.LENGTH_SHORT).show()
-              }
-              return true
-            }
-
-            val clearFailedSetOk = try {
-              setTextToNode(tgEdit, "")
-            } catch (_: Exception) {
-              false
-            }
-
-            appendDebugLog(
-              "GPT→TG",
-              "GPT_TEXTVIEW_EXTRACT_SET_FAILED cleared=$clearFailedSetOk fallbackBlocked=true autoSendBlocked=true"
-            )
-
-            Toast.makeText(
-              this,
-              "GPT 화면 텍스트 입력 검증에 실패했습니다.",
-              Toast.LENGTH_SHORT
-            ).show()
-            return true
-          }
-        }
-
-        val clearNoCandidateOk = try {
-          setTextToNode(tgEdit, "")
-        } catch (_: Exception) {
-          false
-        }
-
-        appendDebugLog(
-          "GPT→TG",
-          "GPT_TEXTVIEW_EXTRACT_INVALID_STOP reason=noValidCandidate candidates=${textViewCandidates.size} cleared=$clearNoCandidateOk fallbackBlocked=true autoSendBlocked=true"
-        )
-
-        Toast.makeText(
-          this,
-          "GPT 화면 텍스트 후보를 찾지 못했습니다.",
-          Toast.LENGTH_SHORT
-        ).show()
-        return true
-
-        appendDebugLog(
-          "GPT→TG",
-          "GPT_SHARE_DIAG_START reason=multiTapInvalid aiRoots=${aiRoots.size} autoSendBlocked=true"
-        )
-
-        val shareCandidates = mutableListOf<AccessibilityNodeInfo>()
-
-        fun collectShareCandidates(node: AccessibilityNodeInfo) {
-          // node is non-null per signature
-          val label = buildNodeLabel(node).trim()
-          val exactShareLabel = label == "공유" || label.equals("Share", ignoreCase = true)
-          if (exactShareLabel) {
-            val candidateRect = android.graphics.Rect()
-            try {
-              node.getBoundsInScreen(candidateRect)
-            } catch (_: Exception) {
-            }
-            val targetCenterY = targetRect.centerY()
-            val candidateWidth = candidateRect.width()
-            val candidateHeight = candidateRect.height()
-            val sameActionRow = kotlin.math.abs(candidateRect.centerY() - targetCenterY) <= 120
-            val rightOfCopyButton = candidateRect.left > targetRect.right
-            val smallButton = candidateWidth in 20..180 && candidateHeight in 20..180
-            val visible = !candidateRect.isEmpty() && candidateRect.top >= 0
-            appendDebugLog(
-              "GPT→TG",
-              "GPT_SHARE_DIAG_FILTER exactLabelOnly=true label=${compactLogPreview(label)} class=${node.className} visible=$visible sameActionRow=$sameActionRow rightOfCopyButton=$rightOfCopyButton smallButton=$smallButton bounds=${candidateRect.left},${candidateRect.top},${candidateRect.right},${candidateRect.bottom}"
-            )
-            if (visible && sameActionRow && rightOfCopyButton && smallButton) {
-              shareCandidates.add(node)
-            }
-          }
-          for (childIndex in 0 until node.childCount) {
-            collectShareCandidates(node.getChild(childIndex) ?: return)
-          }
-        }
-
-        aiRoots.forEach { root ->
-          collectShareCandidates(root ?: return@forEach)
-        }
-
-        appendDebugLog(
-          "GPT→TG",
-          "GPT_SHARE_DIAG_CANDIDATES count=${shareCandidates.size}"
-        )
-
-        shareCandidates.take(8).forEachIndexed { index, candidate ->
-          val shareRect = android.graphics.Rect()
-          try {
-            candidate.getBoundsInScreen(shareRect)
-          } catch (_: Exception) {
-          }
-          appendDebugLog(
-            "GPT→TG",
-            "GPT_SHARE_DIAG_CANDIDATE[$index] label=${compactLogPreview(buildNodeLabel(candidate))} class=${candidate.className} clickable=${candidate.isClickable} bounds=${shareRect.left},${shareRect.top},${shareRect.right},${shareRect.bottom}"
-          )
-        }
-
-        val shareTarget = shareCandidates
-          .filter { candidate ->
-            val rect = android.graphics.Rect()
-            try {
-              candidate.getBoundsInScreen(rect)
-            } catch (_: Exception) {
-            }
-            val label = buildNodeLabel(candidate).trim()
-            val exactShareLabel = label == "공유" || label.equals("Share", ignoreCase = true)
-            val sameActionRow = kotlin.math.abs(rect.centerY() - targetRect.centerY()) <= 120
-            val rightOfCopyButton = rect.left > targetRect.right
-            val smallButton = rect.width() in 20..180 && rect.height() in 20..180
-            exactShareLabel && !rect.isEmpty() && sameActionRow && rightOfCopyButton && smallButton
-          }
-          .minWithOrNull(
-            compareBy<AccessibilityNodeInfo> { candidate ->
-              val rect = android.graphics.Rect()
-              candidate.getBoundsInScreen(rect)
-              kotlin.math.abs(rect.centerY() - targetRect.centerY())
-            }.thenBy { candidate ->
-              val rect = android.graphics.Rect()
-              candidate.getBoundsInScreen(rect)
-              rect.left
-            }
-          )
-
-        if (shareTarget == null) {
-          appendDebugLog(
-            "GPT→TG",
-            "GPT_SHARE_DIAG_SKIPPED reason=noShareTarget fallbackBlocked=true autoSendBlocked=true"
-          )
-          Toast.makeText(
-            this,
-            "GPT 복사 실패: 공유 버튼도 찾지 못했습니다.",
-            Toast.LENGTH_SHORT
-          ).show()
-          return true
-        }
-
-        val shareRect = android.graphics.Rect()
-        shareTarget!!.getBoundsInScreen(shareRect)
-        val shareChain = mutableListOf<AccessibilityNodeInfo>()
-        var chainNode: AccessibilityNodeInfo? = shareTarget
-        while (chainNode != null && shareChain.size < 7) {
-          shareChain.add(chainNode)
-          chainNode = try {
-            chainNode.parent
-          } catch (_: Exception) {
-            null
-          }
-        }
-
-        appendDebugLog(
-          "GPT→TG",
-          "GPT_SHARE_DIAG_PARENT_CHAIN count=${shareChain.size}"
-        )
-
-        shareChain.forEachIndexed { chainIndex, node ->
-          val nodeRect = android.graphics.Rect()
-          try {
-            node.getBoundsInScreen(nodeRect)
-          } catch (_: Exception) {
-          }
-
-          appendDebugLog(
-            "GPT→TG",
-            "GPT_SHARE_DIAG_PARENT[$chainIndex] label=${compactLogPreview(buildNodeLabel(node))} class=${node.className} clickable=${node.isClickable} enabled=${node.isEnabled} bounds=${nodeRect.left},${nodeRect.top},${nodeRect.right},${nodeRect.bottom} childCount=${node.childCount}"
-          )
-        }
-
-        var actionClickSucceeded = false
-        var actionClickIndex = -1
-        var actionClickLabel = ""
-
-        for ((chainIndex, node) in shareChain.withIndex()) {
-          val nodeRect = android.graphics.Rect()
-          try {
-            node.getBoundsInScreen(nodeRect)
-          } catch (_: Exception) {
-          }
-
-          val clickResult = try {
-            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-          } catch (error: Exception) {
-            appendDebugLog(
-              "GPT→TG",
-              "GPT_SHARE_DIAG_ACTION_CLICK_EXCEPTION index=$chainIndex ${error::class.java.simpleName}: ${compactLogPreview(error.message ?: "")}"
-            )
-            false
-          }
-
-          appendDebugLog(
-            "GPT→TG",
-            "GPT_SHARE_DIAG_ACTION_CLICK index=$chainIndex result=$clickResult label=${compactLogPreview(buildNodeLabel(node))} class=${node.className} clickable=${node.isClickable} enabled=${node.isEnabled} bounds=${nodeRect.left},${nodeRect.top},${nodeRect.right},${nodeRect.bottom}"
-          )
-
-          if (clickResult) {
-            actionClickSucceeded = true
-            actionClickIndex = chainIndex
-            actionClickLabel = compactLogPreview(buildNodeLabel(node))
-            break
-          }
-        }
-
-        fun detectShareSheetSnapshot(phase: String): Boolean {
-          val phaseWindows = try {
-            windows ?: emptyList()
-          } catch (_: Exception) {
-            emptyList()
-          }
-          val phaseChooserPackageHits = phaseWindows.mapNotNull { window ->
-            val root = try {
-              window.root
-            } catch (_: Exception) {
-              null
-            }
-            root?.packageName?.toString()
-          }.filter { packageName ->
-            val lowerPackage = packageName.lowercase()
-            lowerPackage.contains("intentresolver") ||
-            lowerPackage.contains("chooser") ||
-            lowerPackage.contains("resolver")
-          }.distinct()
-          val phaseTextNodes = mutableListOf<AccessibilityNodeInfo>()
-          fun collectPhaseTextNodes(node: AccessibilityNodeInfo) {
-            // node is non-null per signature
-            if (phaseTextNodes.size >= 60) return
-            val rect = android.graphics.Rect()
-            try {
-              node.getBoundsInScreen(rect)
-            } catch (_: Exception) {
-            }
-            val label = buildNodeLabel(node).trim()
-            if (label.isNotBlank() && !rect.isEmpty()) {
-              phaseTextNodes.add(node)
-            }
-            for (childIndex in 0 until node.childCount) {
-              collectPhaseTextNodes(node.getChild(childIndex) ?: return)
-            }
-          }
-          phaseWindows.forEach { window ->
-            val root = try {
-              window.root
-            } catch (_: Exception) {
-              null
-            }
-            collectPhaseTextNodes(root!!)
-          }
-          val phaseTextHits = phaseTextNodes.map { node ->
-            buildNodeLabel(node).trim()
-          }.filter { label ->
-            val lowerLabel = label.lowercase()
-            label.contains("공유 대상") ||
-            label.contains("공유 위치") ||
-            label.contains("앱 선택") ||
-            label.contains("공유할") ||
-            (label.contains("공유") && label.length <= 12) ||
-            lowerLabel == "share" ||
-            lowerLabel.contains("choose an app") ||
-            lowerLabel.contains("share with") ||
-            lowerLabel.contains("complete action using") ||
-            lowerLabel.contains("nearby share")
-          }.take(12)
-
-          val detected = phaseChooserPackageHits.isNotEmpty() || phaseTextHits.isNotEmpty()
-
-          appendDebugLog(
-            "GPT→TG",
-            "GPT_SHARE_DIAG_$phase detected=$detected windows=${phaseWindows.size} chooserPackageHits=${phaseChooserPackageHits.size} textHits=${phaseTextHits.size} packages=${compactLogPreview(phaseChooserPackageHits.joinToString("|"))} texts=${compactLogPreview(phaseTextHits.joinToString("|"))}"
-          )
-          return detected
-        }
-
-        fun dispatchCenterGestureForNode(
-          phase: String,
-          node: AccessibilityNodeInfo,
-          fallbackLabel: String
-        ): Boolean {
-          val rect = android.graphics.Rect()
-          try {
-            node.getBoundsInScreen(rect)
-          } catch (_: Exception) {
-          }
-          if (rect.isEmpty()) {
-            appendDebugLog(
-              "GPT→TG",
-              "GPT_SHARE_DIAG_${phase}_GESTURE skipped=true reason=emptyBounds label=${compactLogPreview(fallbackLabel)}"
-            )
-            return false
-          }
-          val tapX = rect.centerX().toFloat()
-          val tapY = rect.centerY().toFloat()
-          val tapPath = android.graphics.Path().apply {
-            moveTo(tapX, tapY)
-          }
-          val tapGesture = android.accessibilityservice.GestureDescription.Builder()
-            .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(tapPath, 0L, 90L))
-            .build()
-          val dispatched = dispatchGesture(tapGesture, null, null)
-
-          appendDebugLog(
-            "GPT→TG",
-            "GPT_SHARE_DIAG_${phase}_GESTURE dispatched=$dispatched label=${compactLogPreview(fallbackLabel)} class=${node.className} clickable=${node.isClickable} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom} tapX=${tapX.toInt()} tapY=${tapY.toInt()}"
-          )
-          return dispatched
-        }
-
-        var shareSheetDetectedAfterAttempts = false
-
-        if (actionClickSucceeded) {
-          appendDebugLog(
-            "GPT→TG",
-            "GPT_SHARE_DIAG_ACTION_CLICK_SELECTED index=$actionClickIndex label=$actionClickLabel"
-          )
-          android.os.SystemClock.sleep(900L)
-          shareSheetDetectedAfterAttempts = detectShareSheetSnapshot("AFTER_ACTION_CLICK")
+        if (autoSend) {
+          scheduleAutoSendAfterPaste("GPT→TG_FULL_TEXTVIEW_EXTRACT", tgEdit)
         } else {
-          appendDebugLog(
-            "GPT→TG",
-            "GPT_SHARE_DIAG_ACTION_CLICK_SELECTED none=true"
-          )
-          shareSheetDetectedAfterAttempts = detectShareSheetSnapshot("AFTER_ACTION_CLICK")
+          Toast.makeText(this, "Telegram 입력창에 붙여넣었습니다.", Toast.LENGTH_SHORT).show()
         }
-
-        if (!shareSheetDetectedAfterAttempts) {
-          dispatchCenterGestureForNode(
-            "TARGET",
-            shareTarget,
-            buildNodeLabel(shareTarget!!)
-          )
-          android.os.SystemClock.sleep(900L)
-          shareSheetDetectedAfterAttempts = detectShareSheetSnapshot("AFTER_TARGET_GESTURE")
-        }
-
-        if (!shareSheetDetectedAfterAttempts) {
-          val clickableParent = if (actionClickIndex >= 0 && actionClickIndex < shareChain.size) {
-            shareChain[actionClickIndex]
-          } else {
-            shareChain.firstOrNull { node ->
-              try {
-                node.isClickable && node.isEnabled
-              } catch (_: Exception) {
-                false
-              }
-            }
-          }
-          if (clickableParent == null) {
-            appendDebugLog(
-              "GPT→TG",
-              "GPT_SHARE_DIAG_PARENT_GESTURE skipped=true reason=noClickableParent"
-            )
-          } else {
-            dispatchCenterGestureForNode(
-              "PARENT",
-              clickableParent,
-              buildNodeLabel(clickableParent)
-            )
-            android.os.SystemClock.sleep(900L)
-            shareSheetDetectedAfterAttempts = detectShareSheetSnapshot("AFTER_PARENT_GESTURE")
-          }
-        }
-
-        appendDebugLog(
-          "GPT→TG",
-          "GPT_SHARE_DIAG_ATTEMPTS_DONE detected=$shareSheetDetectedAfterAttempts actionClickSucceeded=$actionClickSucceeded actionClickIndex=$actionClickIndex"
-        )
-
-        val windowList = try {
-          windows ?: emptyList()
-        } catch (_: Exception) {
-          emptyList()
-        }
-
-        val chooserPackageHits = windowList.mapNotNull { window ->
-          val root = try {
-            window.root
-          } catch (_: Exception) {
-            null
-          }
-          root?.packageName?.toString()
-        }.filter { packageName ->
-          val lowerPackage = packageName.lowercase()
-          lowerPackage.contains("intentresolver") ||
-          lowerPackage.contains("chooser") ||
-          lowerPackage.contains("resolver")
-        }.distinct()
-
-        appendDebugLog(
-          "GPT→TG",
-          "GPT_SHARE_DIAG_WINDOWS count=${windowList.size} chooserPackageHits=${chooserPackageHits.size} packages=${compactLogPreview(chooserPackageHits.joinToString("|"))}"
-        )
-
-        windowList.take(8).forEachIndexed { windowIndex, window ->
-          val root = try {
-            window.root
-          } catch (_: Exception) {
-            null
-          }
-          if (root == null) {
-            appendDebugLog(
-              "GPT→TG",
-              "GPT_SHARE_DIAG_WINDOW[$windowIndex] root=null type=${window.type}"
-            )
-          } else {
-            val rootRect = android.graphics.Rect()
-            try {
-              root.getBoundsInScreen(rootRect)
-            } catch (_: Exception) {
-            }
-            appendDebugLog(
-              "GPT→TG",
-              "GPT_SHARE_DIAG_WINDOW[$windowIndex] type=${window.type} package=${root.packageName} class=${root.className} bounds=${rootRect.left},${rootRect.top},${rootRect.right},${rootRect.bottom} childCount=${root.childCount}"
-            )
-          }
-        }
-
-        val shareSheetTextNodes = mutableListOf<AccessibilityNodeInfo>()
-
-        fun collectShareSheetTextNodes(node: AccessibilityNodeInfo) {
-          // node is non-null per signature
-          if (shareSheetTextNodes.size >= 40) return
-          val rect = android.graphics.Rect()
-          try {
-            node.getBoundsInScreen(rect)
-          } catch (_: Exception) {
-          }
-          val label = buildNodeLabel(node).trim()
-          if (label.isNotBlank() && !rect.isEmpty()) {
-            shareSheetTextNodes.add(node)
-          }
-          for (childIndex in 0 until node.childCount) {
-            collectShareSheetTextNodes(node.getChild(childIndex) ?: return)
-          }
-        }
-
-        windowList.forEach { window ->
-          val root = try {
-            window.root
-          } catch (_: Exception) {
-            null
-          }
-          collectShareSheetTextNodes(root!!)
-        }
-
-        val shareSheetTextHits = shareSheetTextNodes.map { node ->
-          buildNodeLabel(node).trim()
-        }.filter { label ->
-          val lowerLabel = label.lowercase()
-          label.contains("공유 대상") ||
-          label.contains("공유 위치") ||
-          label.contains("앱 선택") ||
-          label.contains("공유할") ||
-          lowerLabel == "share" ||
-          lowerLabel.contains("choose an app") ||
-          lowerLabel.contains("share with") ||
-          lowerLabel.contains("complete action using")
-        }.take(12)
-
-        val shareSheetDetected = chooserPackageHits.isNotEmpty() || shareSheetTextHits.isNotEmpty()
-
-        appendDebugLog(
-          "GPT→TG",
-          "GPT_SHARE_DIAG_TEXT_NODES count=${shareSheetTextNodes.size}"
-        )
-
-        appendDebugLog(
-          "GPT→TG",
-          "GPT_SHARE_DIAG_SHEET_DETECTED_FINAL detected=$shareSheetDetected chooserPackageHits=${chooserPackageHits.size} textHits=${shareSheetTextHits.size} texts=${compactLogPreview(shareSheetTextHits.joinToString("|"))}"
-        )
-
-        shareSheetTextNodes.take(24).forEachIndexed { index, node ->
-          val rect = android.graphics.Rect()
-          try {
-            node.getBoundsInScreen(rect)
-          } catch (_: Exception) {
-          }
-          appendDebugLog(
-            "GPT→TG",
-            "GPT_SHARE_DIAG_TEXT[$index] label=${compactLogPreview(buildNodeLabel(node))} package=${node.packageName} class=${node.className} bounds=${rect.left},${rect.top},${rect.right},${rect.bottom}"
-          )
-        }
-
-        Toast.makeText(
-          this,
-          "공유 버튼 진단을 실행했습니다.공유창이 뜨면 뒤로 닫아주세요.",
-          Toast.LENGTH_SHORT
-        ).show()
         return true
       }
 
@@ -4626,8 +3029,6 @@ override fun onServiceConnected() {
       }
     }
 
-    tgEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-    tgEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
     var pasted = try { pasteClipboardToNode(tgEdit) } catch (error: Exception) { appendDebugLog("GPT→TG", "EXCEPTION copyButtonPaste ${error::class.java.simpleName}: ${error.message}"); false }
     android.os.SystemClock.sleep(300L)
     var pasteValid = isTelegramEditActuallyFilled(tgEdit)
@@ -4645,8 +3046,6 @@ override fun onServiceConnected() {
 
     if (!pasteValid) {
       for (attempt in 1..2) {
-        tgEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-        tgEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         android.os.SystemClock.sleep(300L)
         val retryPasted = try { pasteClipboardToNode(tgEdit) } catch (error: Exception) { appendDebugLog("GPT→TG", "EXCEPTION copyButtonPasteRetry attempt=$attempt ${error::class.java.simpleName}: ${error.message}"); false }
         android.os.SystemClock.sleep(300L)
@@ -5199,7 +3598,6 @@ override fun onServiceConnected() {
       try {
         setTextToNode(editNode, "")
         editNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-        editNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         android.os.SystemClock.sleep(120L)
         val pasteAccepted = pasteClipboardToNode(editNode)
         android.os.SystemClock.sleep(150L)
@@ -5272,16 +3670,6 @@ override fun onServiceConnected() {
   }
 
   private fun sendChatGptForTgToGpt(expectedText: String): TgToGptSendResult {
-    val roots = getChatGptRootsForTgToGpt()
-    val buttonAccepted = clickAiSendButton(roots)
-    appendDebugLog("TG→GPT", "SEND_PATH_BUTTON accepted=$buttonAccepted roots=${roots.size}")
-    if (buttonAccepted) {
-      return if (verifyChatGptSendAfterActionForTgToGpt(expectedText)) {
-        TgToGptSendResult.VERIFIED
-      } else {
-        TgToGptSendResult.ISSUED_UNVERIFIED
-      }
-    }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
       try {
         val accessibilityIme = inputMethod
@@ -5313,6 +3701,25 @@ override fun onServiceConnected() {
           "TG→GPT",
           "SEND_PATH_EDITOR_ACTION_ERROR ${error::class.java.simpleName}: ${compactLogPreview(error.message.orEmpty())}"
         )
+      }
+    }
+
+    val freshRoots = getChatGptRootsForTgToGpt()
+    val freshEdit = findEditableNodeFromRoots(freshRoots)
+    val exactSend = findExactChatGptSendNearComposer(freshRoots, freshEdit)
+    val buttonAccepted = clickNodeOrNearClickableParentSafely(
+      exactSend,
+      ::isChatGptPackageForTgToGpt
+    )
+    appendDebugLog(
+      "TG→GPT",
+      "TG_TO_GPT_SEND_METHOD method=exactButton issued=$buttonAccepted candidatesRestricted=true"
+    )
+    if (buttonAccepted) {
+      return if (verifyChatGptSendAfterActionForTgToGpt(expectedText)) {
+        TgToGptSendResult.VERIFIED
+      } else {
+        TgToGptSendResult.ISSUED_UNVERIFIED
       }
     }
 
@@ -5401,8 +3808,18 @@ override fun onServiceConnected() {
  if (index == 0) { logImeSystemStatusForTgToGpt("fallbackCheck0:$reason:$pendingId") }
  appendDebugLog("TG→GPT", "TG_TO_GPT_IME_FALLBACK_CHECK index=$index delayMs=$delayMs pendingId=$pendingId autoSend=$autoSend reason=$reason data=$data")
  if (prefs.getBoolean("commit_ok", false) && autoSend && sentOnce.compareAndSet(false, true)) {
- val roots = getAiRootsWithRetryForTgToGpt("TG_TO_GPT_IME_AUTOSEND_ROOTS_$index")
- val sent = clickAiSendButton(roots); appendDebugLog("TG→GPT", "TG_TO_GPT_IME_AUTOSEND_ATTEMPT index=$index pendingId=$pendingId roots=${roots.size} sent=$sent reason=$reason")
+ val alreadySentByIme = prefs.getBoolean("editor_action_ok", false)
+ if (alreadySentByIme) {
+ appendDebugLog("TG→GPT", "TG_TO_GPT_IME_AUTOSEND_SKIPPED reason=imeAlreadySent")
+ } else {
+ val pendingText = prefs.getString("pending_text", "").orEmpty()
+ val result = if (pendingText.isNotBlank()) {
+ sendChatGptForTgToGpt(pendingText)
+ } else {
+ TgToGptSendResult.FAILED
+ }
+ appendDebugLog("TG→GPT", "TG_TO_GPT_IME_AUTOSEND_SAFE result=$result")
+ }
  }
  }, delayMs) }
  }
@@ -5961,7 +4378,6 @@ override fun onServiceConnected() {
       }
 
       service.appendDebugLog("GPT\u2192TG", "START mode=$gptOutputMode autoSend=$autoSend")
-      service.rememberGptToTelegramStartFocus("start")
       service.appendDebugLog("GPT\u2192TG", "STEP after START")
 
        val aiRoots = service.getAiRoots()
