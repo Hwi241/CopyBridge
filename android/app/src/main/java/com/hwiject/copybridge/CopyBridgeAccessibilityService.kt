@@ -72,6 +72,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val direction: String = "",
     val collected: List<String> = emptyList(),
     val gapSuspected: Boolean = false,
+    val beginSeen: Boolean = false,
+    val readySeen: Boolean = false,
     val collectionInterrupted: Boolean = false,
     val autoExchange: Boolean = false,
     val gptMode: String = "FULL",
@@ -111,6 +113,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       direction = prefs.getString(ROUND_TRIP_KEY_DIRECTION, "").orEmpty(),
       collected = collected,
       gapSuspected = prefs.getBoolean(ROUND_TRIP_KEY_GAP, false),
+      beginSeen = prefs.getBoolean(ROUND_TRIP_KEY_BEGIN_SEEN, false),
+      readySeen = prefs.getBoolean(ROUND_TRIP_KEY_READY_SEEN, false),
       collectionInterrupted = prefs.getBoolean(
         ROUND_TRIP_KEY_COLLECTION_INTERRUPTED,
         false
@@ -136,6 +140,8 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       .putString(ROUND_TRIP_KEY_DIRECTION, state.direction)
       .putString(ROUND_TRIP_KEY_COLLECTED, collectedJson)
       .putBoolean(ROUND_TRIP_KEY_GAP, state.gapSuspected)
+      .putBoolean(ROUND_TRIP_KEY_BEGIN_SEEN, state.beginSeen)
+      .putBoolean(ROUND_TRIP_KEY_READY_SEEN, state.readySeen)
       .putBoolean(
         ROUND_TRIP_KEY_COLLECTION_INTERRUPTED,
         state.collectionInterrupted
@@ -1228,7 +1234,9 @@ override fun onServiceConnected() {
           sequence = "",
           direction = "",
           collected = emptyList(),
-          gapSuspected = false
+          gapSuspected = false,
+          beginSeen = false,
+          readySeen = false
         )
       )
       lastRoundTripFrameSignature = ""
@@ -2101,9 +2109,6 @@ override fun onServiceConnected() {
   private fun currentRoundTripText(state: RoundTripState): String =
     state.collected.joinToString("\n").trim()
 
-  private fun withRoundTripText(state: RoundTripState, text: String): RoundTripState =
-    state.copy(collected = if (text.isBlank()) emptyList() else listOf(text))
-
   private fun mergeRoundTripTextBidirectional(
     existingRaw: String,
     incomingRaw: String
@@ -2144,6 +2149,38 @@ override fun onServiceConnected() {
     }
   }
 
+  private fun coalesceRoundTripFragments(
+    existing: List<String>,
+    incoming: String
+  ): List<String> {
+    val fragments = existing.mapNotNull { fragment ->
+      mergeRoundTripTextBidirectional("", fragment).text.takeIf { it.isNotBlank() }
+    }.toMutableList()
+    mergeRoundTripTextBidirectional("", incoming).text
+      .takeIf { it.isNotBlank() }
+      ?.let(fragments::add)
+
+    var mergedPair = true
+    while (mergedPair) {
+      mergedPair = false
+      pairLoop@ for (leftIndex in 0 until fragments.size) {
+        for (rightIndex in leftIndex + 1 until fragments.size) {
+          val merged = mergeRoundTripTextBidirectional(
+            fragments[leftIndex],
+            fragments[rightIndex]
+          )
+          if (merged.merged) {
+            fragments[leftIndex] = merged.text
+            fragments.removeAt(rightIndex)
+            mergedPair = true
+            break@pairLoop
+          }
+        }
+      }
+    }
+    return fragments
+  }
+
   private fun markRoundTripAmbiguous(state: RoundTripState, message: String, reason: String) {
     appendDebugLog("ROUND_TRIP", "AMBIGUOUS reason=$reason job=${state.jobId}")
     saveRoundTripState(state.copy(phase = ROUND_TRIP_PHASE_AMBIGUOUS))
@@ -2153,27 +2190,40 @@ override fun onServiceConnected() {
   private fun saveRoundTripText(
     state: RoundTripState,
     incoming: String,
-    complete: Boolean,
     resetDisconnectedProvisional: Boolean = false
   ) {
-    val existing = currentRoundTripText(state)
-    val merged = mergeRoundTripTextBidirectional(existing, incoming)
-    val disconnectedProvisional =
-      resetDisconnectedProvisional &&
+    var provisionalGap = false
+    val fragments = if (resetDisconnectedProvisional) {
+      val existing = currentRoundTripText(state)
+      val merged = mergeRoundTripTextBidirectional(existing, incoming)
+      val text = if (
         existing.isNotBlank() && incoming.isNotBlank() && !merged.merged
-    val collectedText = if (disconnectedProvisional) {
-      mergeRoundTripTextBidirectional("", incoming).text
+      ) {
+        mergeRoundTripTextBidirectional("", incoming).text
+      } else {
+        merged.text
+      }
+      if (text.isBlank()) emptyList() else listOf(text)
+    } else if (state.beginSeen || state.readySeen) {
+      coalesceRoundTripFragments(state.collected, incoming)
     } else {
-      merged.text
-    }
-    val gap = if (disconnectedProvisional) {
-      false
-    } else {
-      state.gapSuspected ||
+      val existing = currentRoundTripText(state)
+      val merged = mergeRoundTripTextBidirectional(existing, incoming)
+      provisionalGap = state.gapSuspected ||
         (existing.isNotBlank() && incoming.isNotBlank() && !merged.merged)
+      if (merged.text.isBlank()) emptyList() else listOf(merged.text)
     }
-    val updated = withRoundTripText(state, collectedText).copy(gapSuspected = gap)
-    if (collectedText.length > ROUND_TRIP_MAX_COLLECTED_CHARS) {
+    val gap = if (state.beginSeen || state.readySeen) {
+      fragments.size > 1
+    } else {
+      provisionalGap
+    }
+    val updated = state.copy(collected = fragments, gapSuspected = gap)
+    val collectedChars = fragments.sumOf { it.length }
+    if (
+      fragments.size > ROUND_TRIP_MAX_COLLECTED_BLOCKS ||
+      collectedChars > ROUND_TRIP_MAX_COLLECTED_CHARS
+    ) {
       markRoundTripAmbiguous(
         updated,
         "완료보고 수집 크기 제한을 초과했습니다.",
@@ -2181,14 +2231,9 @@ override fun onServiceConnected() {
       )
       return
     }
-    if (complete) {
-      if (gap) {
-        markRoundTripAmbiguous(
-          updated,
-          "완료보고 수집 중 화면 연결이 끊긴 구간이 있어 자동 전달하지 않습니다.",
-          "gapSuspected"
-        )
-      } else if (collectedText.isBlank()) {
+    if (updated.beginSeen && updated.readySeen && !gap) {
+      val collectedText = fragments.singleOrNull().orEmpty()
+      if (collectedText.isBlank()) {
         markRoundTripAmbiguous(updated, "수집된 완료보고가 없습니다.", "emptyResult")
       } else {
         saveRoundTripState(updated.copy(phase = ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT))
@@ -2215,6 +2260,8 @@ override fun onServiceConnected() {
         direction = "",
         collected = emptyList(),
         gapSuspected = false,
+        beginSeen = false,
+        readySeen = false,
         collectionInterrupted = false
       )
       lastRoundTripFrameSignature = ""
@@ -2265,9 +2312,13 @@ override fun onServiceConnected() {
       }
       if (samePair != null) {
         saveRoundTripText(
-          state.copy(jobId = samePair.first, sequence = samePair.second),
+          state.copy(
+            jobId = samePair.first,
+            sequence = samePair.second,
+            beginSeen = true,
+            readySeen = true
+          ),
           frameText,
-          true,
           resetDisconnectedProvisional = true
         )
         return
@@ -2284,10 +2335,10 @@ override fun onServiceConnected() {
             phase = ROUND_TRIP_PHASE_COLLECTING_FORWARD,
             jobId = begin.first,
             sequence = begin.second,
-            direction = "FORWARD"
+            direction = "FORWARD",
+            beginSeen = true
           ),
           frameText,
-          false,
           resetDisconnectedProvisional = true
         )
       } else if (ready != null) {
@@ -2296,14 +2347,14 @@ override fun onServiceConnected() {
             phase = ROUND_TRIP_PHASE_COLLECTING_REVERSE,
             jobId = ready.first,
             sequence = ready.second,
-            direction = "REVERSE"
+            direction = "REVERSE",
+            readySeen = true
           ),
           frameText,
-          false,
           resetDisconnectedProvisional = true
         )
       } else {
-        saveRoundTripText(state, frameText, false)
+        saveRoundTripText(state, frameText)
       }
       return
     }
@@ -2321,13 +2372,15 @@ override fun onServiceConnected() {
     if (state.phase == ROUND_TRIP_PHASE_COLLECTING_FORWARD) {
       val ready = boundaries.readyMarkers.firstOrNull { it == expectedIdentity }
       saveRoundTripText(
-        state,
-        frameText,
-        ready != null
+        state.copy(readySeen = state.readySeen || ready != null),
+        frameText
       )
     } else {
       val beginFound = boundaries.beginMarkers.contains(expectedIdentity)
-      saveRoundTripText(state, frameText, beginFound)
+      saveRoundTripText(
+        state.copy(beginSeen = state.beginSeen || beginFound),
+        frameText
+      )
     }
   }
 
@@ -2347,7 +2400,7 @@ override fun onServiceConnected() {
     val state = loadRoundTripState()
     if (
       state.phase != ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT ||
-      !state.autoExchange || state.gapSuspected || state.collected.isEmpty()
+      !state.autoExchange || state.gapSuspected || state.collected.size != 1
     ) return
     val text = state.collected.joinToString("\n\n").trim()
     if (text.isBlank()) {
@@ -4901,6 +4954,8 @@ override fun onServiceConnected() {
     private const val ROUND_TRIP_KEY_DIRECTION = "direction"
     private const val ROUND_TRIP_KEY_COLLECTED = "collected_json"
     private const val ROUND_TRIP_KEY_GAP = "gap_suspected"
+    private const val ROUND_TRIP_KEY_BEGIN_SEEN = "begin_seen"
+    private const val ROUND_TRIP_KEY_READY_SEEN = "ready_seen"
     private const val ROUND_TRIP_KEY_COLLECTION_INTERRUPTED =
       "collection_interrupted"
     private const val ROUND_TRIP_KEY_AUTO_EXCHANGE = "auto_exchange"
@@ -4927,6 +4982,8 @@ override fun onServiceConnected() {
       val jobId: String,
       val collectedCount: Int,
       val gapSuspected: Boolean,
+      val beginSeen: Boolean,
+      val readySeen: Boolean,
       val autoExchange: Boolean
     )
 
@@ -4943,6 +5000,8 @@ override fun onServiceConnected() {
         jobId = prefs.getString(ROUND_TRIP_KEY_JOB_ID, "").orEmpty(),
         collectedCount = count,
         gapSuspected = prefs.getBoolean(ROUND_TRIP_KEY_GAP, false),
+        beginSeen = prefs.getBoolean(ROUND_TRIP_KEY_BEGIN_SEEN, false),
+        readySeen = prefs.getBoolean(ROUND_TRIP_KEY_READY_SEEN, false),
         autoExchange = prefs.getBoolean(ROUND_TRIP_KEY_AUTO_EXCHANGE, false)
       )
     }

@@ -1182,9 +1182,13 @@ class FloatingWidgetService : Service() {
           "답변 기다리는 중 · 취소"
         }
       CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_COLLECTING_FORWARD ->
-        if (compact) "수집↓" else "$job 수집중↓ · 취소"
+        if (state.beginSeen && state.readySeen && state.gapSuspected) {
+          if (compact) "누락" else "누락 구간 찾는 중 · 취소"
+        } else if (compact) "수집↓" else "$job 수집중↓ · 취소"
       CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_COLLECTING_REVERSE ->
-        if (compact) "수집↑" else "$job 수집중↑ · 취소"
+        if (state.beginSeen && state.readySeen && state.gapSuspected) {
+          if (compact) "누락" else "누락 구간 찾는 중 · 취소"
+        } else if (compact) "수집↑" else "$job 수집중↑ · 취소"
       CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT ->
         if (compact) "GPT" else "$job GPT 전달대기 · 취소"
       CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_GPT_DELIVERING ->
@@ -1206,9 +1210,13 @@ class FloatingWidgetService : Service() {
       CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_AWAITING_JOB ->
         if (state.collectedCount > 0) "⏳ Telegram 경계 찾는 중" else "⏳ Telegram 답변 대기"
       CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_COLLECTING_FORWARD ->
-        "⏳ $job 수집중 ↓$gap"
+        if (state.beginSeen && state.readySeen && state.gapSuspected) {
+          "⏳ $job 누락 구간 찾는 중"
+        } else "⏳ $job 수집중 ↓$gap"
       CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_COLLECTING_REVERSE ->
-        "⏳ $job 수집중 ↑$gap"
+        if (state.beginSeen && state.readySeen && state.gapSuspected) {
+          "⏳ $job 누락 구간 찾는 중"
+        } else "⏳ $job 수집중 ↑$gap"
       CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT -> "⏳ $job GPT 전달대기"
       CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_GPT_DELIVERING -> "⏳ GPT 전달중"
       CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_AMBIGUOUS -> "⚠️ $job 확인 필요$gap"
