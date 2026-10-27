@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
@@ -13,6 +14,7 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
+import org.json.JSONArray
 
 class CopyBridgeAccessibilityService : AccessibilityService() {
   private val bridgeStatusMonitorHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -48,6 +50,129 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     override fun run() {
       runPendingGptToTelegramCheck()
     }
+  }
+  private val roundTripFrameHandler = Handler(Looper.getMainLooper())
+  private val roundTripFrameRunnable = Runnable { processRoundTripTelegramFrame() }
+  private var lastRoundTripFrameSignature = ""
+  private val roundTripResumeHandler = Handler(Looper.getMainLooper())
+  private var roundTripResumeRunning = false
+  private val roundTripResumeRunnable = object : Runnable {
+    override fun run() {
+      runRoundTripResumeTick()
+      if (roundTripResumeRunning) {
+        roundTripResumeHandler.postDelayed(this, 1000L)
+      }
+    }
+  }
+
+  private data class RoundTripState(
+    val phase: String = ROUND_TRIP_PHASE_IDLE,
+    val jobId: String = "",
+    val sequence: String = "",
+    val direction: String = "",
+    val collected: List<String> = emptyList(),
+    val gapSuspected: Boolean = false,
+    val collectionInterrupted: Boolean = false,
+    val autoExchange: Boolean = false,
+    val gptMode: String = "FULL",
+    val autoSend: Boolean = false,
+    val createdAtMs: Long = 0L
+  )
+
+  private data class RoundTripBoundarySnapshot(
+    val beginMarkers: List<Pair<String, String>>,
+    val readyMarkers: List<Pair<String, String>>
+  )
+
+  private data class RoundTripTextMergeResult(
+    val text: String,
+    val merged: Boolean,
+    val changed: Boolean
+  )
+
+  private fun loadRoundTripState(): RoundTripState {
+    val prefs = getSharedPreferences(ROUND_TRIP_PREFS, MODE_PRIVATE)
+    val collected = try {
+      val array = JSONArray(prefs.getString(ROUND_TRIP_KEY_COLLECTED, "[]").orEmpty())
+      buildList {
+        for (index in 0 until array.length()) {
+          val value = array.optString(index).trim()
+          if (value.isNotBlank()) add(value)
+        }
+      }
+    } catch (_: Exception) {
+      emptyList()
+    }
+    return RoundTripState(
+      phase = prefs.getString(ROUND_TRIP_KEY_PHASE, ROUND_TRIP_PHASE_IDLE)
+        ?: ROUND_TRIP_PHASE_IDLE,
+      jobId = prefs.getString(ROUND_TRIP_KEY_JOB_ID, "").orEmpty(),
+      sequence = prefs.getString(ROUND_TRIP_KEY_SEQUENCE, "").orEmpty(),
+      direction = prefs.getString(ROUND_TRIP_KEY_DIRECTION, "").orEmpty(),
+      collected = collected,
+      gapSuspected = prefs.getBoolean(ROUND_TRIP_KEY_GAP, false),
+      collectionInterrupted = prefs.getBoolean(
+        ROUND_TRIP_KEY_COLLECTION_INTERRUPTED,
+        false
+      ),
+      autoExchange = prefs.getBoolean(ROUND_TRIP_KEY_AUTO_EXCHANGE, false),
+      gptMode = prefs.getString(ROUND_TRIP_KEY_MODE, "FULL") ?: "FULL",
+      autoSend = prefs.getBoolean(ROUND_TRIP_KEY_AUTO_SEND, false),
+      createdAtMs = prefs.getLong(ROUND_TRIP_KEY_CREATED_AT, 0L)
+    )
+  }
+
+  private fun saveRoundTripState(
+    state: RoundTripState,
+    refreshWidget: Boolean = true
+  ) {
+    val collectedJson = JSONArray().apply {
+      state.collected.forEach { put(it) }
+    }.toString()
+    getSharedPreferences(ROUND_TRIP_PREFS, MODE_PRIVATE).edit()
+      .putString(ROUND_TRIP_KEY_PHASE, state.phase)
+      .putString(ROUND_TRIP_KEY_JOB_ID, state.jobId)
+      .putString(ROUND_TRIP_KEY_SEQUENCE, state.sequence)
+      .putString(ROUND_TRIP_KEY_DIRECTION, state.direction)
+      .putString(ROUND_TRIP_KEY_COLLECTED, collectedJson)
+      .putBoolean(ROUND_TRIP_KEY_GAP, state.gapSuspected)
+      .putBoolean(
+        ROUND_TRIP_KEY_COLLECTION_INTERRUPTED,
+        state.collectionInterrupted
+      )
+      .putBoolean(ROUND_TRIP_KEY_AUTO_EXCHANGE, state.autoExchange)
+      .putString(ROUND_TRIP_KEY_MODE, state.gptMode)
+      .putBoolean(ROUND_TRIP_KEY_AUTO_SEND, state.autoSend)
+      .putLong(ROUND_TRIP_KEY_CREATED_AT, state.createdAtMs)
+      .apply()
+    if (refreshWidget) {
+      try {
+        startService(Intent(this, FloatingWidgetService::class.java).apply {
+          action = FloatingWidgetService.ACTION_REFRESH_WIDGET
+        })
+      } catch (error: Exception) {
+        appendDebugLog(
+          "ROUND_TRIP",
+          "WIDGET_REFRESH_FAILED ${error::class.java.simpleName}"
+        )
+      }
+    }
+  }
+
+  private fun clearRoundTripState(reason: String, showToast: Boolean = false) {
+    appendDebugLog("ROUND_TRIP", "CLEAR reason=$reason")
+    saveRoundTripState(RoundTripState())
+    lastRoundTripFrameSignature = ""
+    stopRoundTripResumeLoop()
+    if (showToast) Toast.makeText(this, "자동 주고받기를 취소했습니다.", Toast.LENGTH_SHORT).show()
+  }
+
+  private fun cancelRoundTrip(reason: String, showToast: Boolean = true) {
+    pendingGptToTelegramHandler.removeCallbacks(pendingGptToTelegramRunnable)
+    pendingGptToTelegram = null
+    pendingGptIdleChecks = 0
+    roundTripFrameHandler.removeCallbacks(roundTripFrameRunnable)
+    clearRoundTripState(reason, showToast)
   }
     private fun startBridgeStatusMonitor() {
     if (bridgeStatusMonitorRunning) return
@@ -568,6 +693,7 @@ override fun onServiceConnected() {
 
     super.onServiceConnected()
     activeService = this
+    restorePendingRoundTripIfNeeded()
     Toast.makeText(this, "CopyBridge 접근성 서비스가 연결되었습니다.", Toast.LENGTH_SHORT).show()
   }
 
@@ -581,6 +707,7 @@ override fun onServiceConnected() {
       "auto_send_enabled",
       false
     )
+    val autoExchange = prefs.getBoolean("auto_exchange_enabled", false)
 
     return when (action) {
       CopyBridgeKeyboardShortcutBridge.ACTION_TELEGRAM_TO_GPT -> {
@@ -625,7 +752,8 @@ override fun onServiceConnected() {
         CopyBridgeAccessibilityService.requestGptToTelegram(
           this,
           gptMode,
-          autoSend
+          autoSend,
+          autoExchange
         )
       }
 
@@ -694,17 +822,25 @@ override fun onServiceConnected() {
   }
 
   override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-    val packageName = event?.packageName?.toString()
-    if (!packageName.isNullOrBlank()) {
-      lastPackageName = packageName
-    }
-
     val safeEvent = event ?: return
-    if (packageName != YOUTUBE_PACKAGE_NAME) {
+    val packageName = safeEvent.packageName?.toString().orEmpty()
+    if (packageName.isNotBlank()) lastPackageName = packageName
+
+    if (packageName == YOUTUBE_PACKAGE_NAME) {
+      handleYouTubeAutoSkipEvent(safeEvent)
       return
     }
 
-    handleYouTubeAutoSkipEvent(safeEvent)
+    if (
+      isTelegramPackage(packageName) &&
+      (
+        safeEvent.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
+        safeEvent.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+        safeEvent.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+      )
+    ) {
+      scheduleRoundTripTelegramFrameRead()
+    }
   }
 
   private fun isYouTubeAutoSkipEnabled(): Boolean {
@@ -880,6 +1016,9 @@ override fun onServiceConnected() {
     pendingGptToTelegramHandler.removeCallbacks(pendingGptToTelegramRunnable)
     pendingGptToTelegram = null
     pendingGptIdleChecks = 0
+    roundTripFrameHandler.removeCallbacks(roundTripFrameRunnable)
+    roundTripResumeRunning = false
+    roundTripResumeHandler.removeCallbacks(roundTripResumeRunnable)
 
     if (activeService === this) {
       activeService = null
@@ -1029,6 +1168,9 @@ override fun onServiceConnected() {
     editableNode: AccessibilityNodeInfo
   ) {
     if (!autoSend) {
+      if (loadRoundTripState().phase == ROUND_TRIP_PHASE_GPT_TO_TG_SENDING) {
+        clearRoundTripState("telegramInputCompletedWithoutAutoSend")
+      }
       Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode", Toast.LENGTH_SHORT).show()
       return
     }
@@ -1047,6 +1189,7 @@ override fun onServiceConnected() {
 
       if (firstSent) {
         Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode + 전송", Toast.LENGTH_SHORT).show()
+        onRoundTripTelegramSendSucceeded()
         hideTelegramKeyboardAfterSendSafely("firstSent")
         return@postDelayed
       }
@@ -1058,8 +1201,10 @@ override fun onServiceConnected() {
 
         if (secondSent) {
           Toast.makeText(this, "AI → TG 붙여넣기 완료: $mode + 전송", Toast.LENGTH_SHORT).show()
+          onRoundTripTelegramSendSucceeded()
           hideTelegramKeyboardAfterSendSafely("secondSent")
         } else {
+          onRoundTripTelegramSendFailed("safeTelegramSendNotFound")
           val debug = buildTelegramCopyDebugInfo(secondRoots)
           copyToClipboard(debug)
           Toast.makeText(
@@ -1070,6 +1215,48 @@ override fun onServiceConnected() {
         }
       }, 350L)
     }, 450L)
+  }
+
+  private fun onRoundTripTelegramSendSucceeded() {
+    val state = loadRoundTripState()
+    if (state.phase != ROUND_TRIP_PHASE_GPT_TO_TG_SENDING) return
+    if (state.autoExchange && state.autoSend) {
+      saveRoundTripState(
+        state.copy(
+          phase = ROUND_TRIP_PHASE_AWAITING_JOB,
+          jobId = "",
+          sequence = "",
+          direction = "",
+          collected = emptyList(),
+          gapSuspected = false
+        )
+      )
+      lastRoundTripFrameSignature = ""
+      startRoundTripResumeLoop()
+    } else {
+      clearRoundTripState("telegramSendSucceededManual")
+    }
+  }
+
+  private fun onRoundTripTelegramSendFailed(reason: String) {
+    if (loadRoundTripState().phase == ROUND_TRIP_PHASE_GPT_TO_TG_SENDING) {
+      clearRoundTripState("telegramSendFailed:$reason")
+    }
+  }
+
+  private fun scheduleRoundTripSendingWatchdog(createdAtMs: Long) {
+    Handler(Looper.getMainLooper()).postDelayed({
+      val state = loadRoundTripState()
+      if (
+        state.phase == ROUND_TRIP_PHASE_GPT_TO_TG_SENDING &&
+        state.createdAtMs == createdAtMs
+      ) {
+        pendingGptToTelegram = null
+        pendingGptIdleChecks = 0
+        clearRoundTripState("telegramSendWatchdog")
+        Toast.makeText(this, "Telegram 전송을 확인하지 못했습니다.", Toast.LENGTH_SHORT).show()
+      }
+    }, 20_000L)
   }
 
   private fun clearTelegramInputFocusAfterSend(source: String): Boolean {
@@ -1363,6 +1550,7 @@ override fun onServiceConnected() {
    private data class PendingGptToTelegramRequest(
     val mode: String,
     val autoSend: Boolean,
+    val autoExchange: Boolean,
     val requestedAtMs: Long
   )
 
@@ -1590,20 +1778,33 @@ override fun onServiceConnected() {
    private fun queueGptToTelegramAfterCompletion(
     context: Context,
     mode: String,
-    autoSend: Boolean
+    autoSend: Boolean,
+    autoExchange: Boolean
   ) {
     val replacing = pendingGptToTelegram != null
+    val requestedAt = System.currentTimeMillis()
     pendingGptToTelegram = PendingGptToTelegramRequest(
       mode = mode,
       autoSend = autoSend,
-      requestedAtMs = System.currentTimeMillis()
+      autoExchange = autoExchange,
+      requestedAtMs = requestedAt
     )
+    saveRoundTripState(
+      RoundTripState(
+        phase = ROUND_TRIP_PHASE_GPT_RESERVED,
+        autoExchange = autoExchange,
+        gptMode = mode,
+        autoSend = autoSend,
+        createdAtMs = requestedAt
+      )
+    )
+    startRoundTripResumeLoop()
     pendingGptIdleChecks = 0
     pendingGptToTelegramHandler.removeCallbacks(pendingGptToTelegramRunnable)
     pendingGptToTelegramHandler.postDelayed(pendingGptToTelegramRunnable, 700L)
     appendDebugLog(
       "GPT→TG",
-      "GPT_TO_TG_QUEUED mode=$mode autoSend=$autoSend replacing=$replacing"
+      "GPT_TO_TG_QUEUED mode=$mode autoSend=$autoSend autoExchange=$autoExchange replacing=$replacing"
     )
     Toast.makeText(
       context,
@@ -1616,10 +1817,11 @@ override fun onServiceConnected() {
   private fun runPendingGptToTelegramCheck() {
     val pending = pendingGptToTelegram ?: return
     val ageMs = System.currentTimeMillis() - pending.requestedAtMs
-    if (ageMs > 10 * 60 * 1000L) {
+    if (ageMs > GPT_TO_TG_RESERVATION_MAX_AGE_MS) {
       appendDebugLog("GPT→TG", "GPT_TO_TG_QUEUE_EXPIRED ageMs=$ageMs")
       pendingGptToTelegram = null
       pendingGptIdleChecks = 0
+      clearRoundTripState("reservationExpired")
       Toast.makeText(
         this,
         "GPT→Telegram 전송 예약이 시간 초과로 취소되었습니다.",
@@ -1629,16 +1831,17 @@ override fun onServiceConnected() {
     }
 
     val roots = getAiRoots()
-    if (roots.isEmpty()) {
+    val tgRoots = getTelegramRoots()
+    if (roots.isEmpty() || tgRoots.isEmpty()) {
       pendingGptIdleChecks = 0
-      pendingGptToTelegramHandler.postDelayed(pendingGptToTelegramRunnable, 700L)
+      pendingGptToTelegramHandler.postDelayed(pendingGptToTelegramRunnable, 1000L)
       return
     }
 
-    val definitelyBusy = hasExactShortGptBusyNodeForDecision(roots)
+    val definitelyBusy = isGptDefinitelyBusyForReservation(roots)
     if (definitelyBusy) {
       pendingGptIdleChecks = 0
-      pendingGptToTelegramHandler.postDelayed(pendingGptToTelegramRunnable, 700L)
+      pendingGptToTelegramHandler.postDelayed(pendingGptToTelegramRunnable, 1000L)
       return
     }
 
@@ -1648,17 +1851,35 @@ override fun onServiceConnected() {
       "GPT_TO_TG_QUEUE_IDLE checks=$pendingGptIdleChecks"
     )
     if (pendingGptIdleChecks < 2) {
-      pendingGptToTelegramHandler.postDelayed(pendingGptToTelegramRunnable, 700L)
+      pendingGptToTelegramHandler.postDelayed(pendingGptToTelegramRunnable, 1000L)
       return
     }
 
+    saveRoundTripState(
+      loadRoundTripState().copy(phase = ROUND_TRIP_PHASE_GPT_TO_TG_SENDING)
+    )
     pendingGptToTelegram = null
     pendingGptIdleChecks = 0
     appendDebugLog(
       "GPT→TG",
       "GPT_TO_TG_QUEUE_DISPATCH mode=${pending.mode} autoSend=${pending.autoSend}"
     )
-    requestGptToTelegramNow(this, pending.mode, pending.autoSend)
+    scheduleRoundTripSendingWatchdog(pending.requestedAtMs)
+    if (!requestGptToTelegramNow(this, pending.mode, pending.autoSend)) {
+      onRoundTripTelegramSendFailed("reservedDispatchRejected")
+    }
+  }
+
+  private fun isGptDefinitelyBusyForReservation(
+    aiRoots: List<AccessibilityNodeInfo>
+  ): Boolean {
+    val exactBusy = aiRoots.isNotEmpty() && hasExactShortGptBusyNodeForDecision(aiRoots)
+    val monitorBusy = lastBridgeMonitorGptBusy == true
+    appendDebugLog(
+      "GPT→TG",
+      "GPT_RESERVATION_BUSY_DECISION exact=$exactBusy monitor=$monitorBusy"
+    )
+    return exactBusy || monitorBusy
   }
 
   private fun requestGptToTelegramNow(
@@ -1670,20 +1891,483 @@ override fun onServiceConnected() {
   private fun requestGptToTelegramWithReservation(
     context: Context,
     gptOutputMode: String,
-    autoSend: Boolean
+    autoSend: Boolean,
+    autoExchange: Boolean
   ): Boolean {
     val roots = getAiRoots()
-    val definitelyBusy = roots.isNotEmpty() && hasExactShortGptBusyNodeForDecision(roots)
+    val tgRoots = getTelegramRoots()
+    val definitelyBusy = isGptDefinitelyBusyForReservation(roots)
+    val bothRootsReady = roots.isNotEmpty() && tgRoots.isNotEmpty()
     appendDebugLog(
       "GPT→TG",
-      "GPT_TO_TG_RESERVATION_DECISION definitelyBusy=$definitelyBusy roots=${roots.size}"
+      "GPT_TO_TG_RESERVATION_DECISION definitelyBusy=$definitelyBusy aiRoots=${roots.size} tgRoots=${tgRoots.size}"
     )
-    return if (definitelyBusy) {
-      queueGptToTelegramAfterCompletion(context, gptOutputMode, autoSend)
+    return if (definitelyBusy || !bothRootsReady) {
+      queueGptToTelegramAfterCompletion(context, gptOutputMode, autoSend, autoExchange)
       true
     } else {
-      requestGptToTelegramNow(context, gptOutputMode, autoSend)
+      val createdAt = System.currentTimeMillis()
+      saveRoundTripState(
+        RoundTripState(
+          phase = ROUND_TRIP_PHASE_GPT_TO_TG_SENDING,
+          autoExchange = autoExchange,
+          gptMode = gptOutputMode,
+          autoSend = autoSend,
+          createdAtMs = createdAt
+        )
+      )
+      scheduleRoundTripSendingWatchdog(createdAt)
+      val started = requestGptToTelegramNow(context, gptOutputMode, autoSend)
+      if (!started) onRoundTripTelegramSendFailed("immediateDispatchRejected")
+      started
     }
+  }
+
+  private fun restorePendingRoundTripIfNeeded() {
+    val state = loadRoundTripState()
+    if (state.phase == ROUND_TRIP_PHASE_GPT_DELIVERING) {
+      saveRoundTripState(state.copy(phase = ROUND_TRIP_PHASE_AMBIGUOUS))
+      return
+    }
+    if (state.phase == ROUND_TRIP_PHASE_GPT_RESERVED) {
+      val ageMs = System.currentTimeMillis() - state.createdAtMs
+      if (state.createdAtMs <= 0L || ageMs > GPT_TO_TG_RESERVATION_MAX_AGE_MS) {
+        clearRoundTripState("restoreExpired")
+        return
+      }
+      pendingGptToTelegram = PendingGptToTelegramRequest(
+        mode = state.gptMode,
+        autoSend = state.autoSend,
+        autoExchange = state.autoExchange,
+        requestedAtMs = state.createdAtMs
+      )
+      pendingGptIdleChecks = 0
+      pendingGptToTelegramHandler.removeCallbacks(pendingGptToTelegramRunnable)
+      pendingGptToTelegramHandler.postDelayed(pendingGptToTelegramRunnable, 1000L)
+    }
+    if (state.phase != ROUND_TRIP_PHASE_IDLE && state.autoExchange) {
+      startRoundTripResumeLoop()
+    }
+  }
+
+  private fun startRoundTripResumeLoop() {
+    if (roundTripResumeRunning) return
+    roundTripResumeRunning = true
+    roundTripResumeHandler.removeCallbacks(roundTripResumeRunnable)
+    roundTripResumeHandler.postDelayed(roundTripResumeRunnable, 1000L)
+  }
+
+  private fun stopRoundTripResumeLoop() {
+    roundTripResumeRunning = false
+    roundTripResumeHandler.removeCallbacks(roundTripResumeRunnable)
+  }
+
+  private fun getExplicitActiveForegroundPackageForRoundTrip(): String? {
+    val activeRootPackage = try {
+      rootInActiveWindow?.packageName?.toString().orEmpty()
+    } catch (_: Exception) {
+      ""
+    }
+    if (activeRootPackage.isNotBlank()) return activeRootPackage
+
+    return getInteractiveWindowsAcrossAllDisplays().firstNotNullOfOrNull { window ->
+      if (!window.isActive) return@firstNotNullOfOrNull null
+      val packageName = try {
+        window.root?.packageName?.toString().orEmpty()
+      } catch (_: Exception) {
+        ""
+      }
+      packageName.ifBlank { null }
+    }
+  }
+
+  private fun isTelegramForegroundForRoundTrip(): Boolean =
+    getExplicitActiveForegroundPackageForRoundTrip()?.let(::isTelegramPackage) == true
+
+  private fun runRoundTripResumeTick() {
+    val state = loadRoundTripState()
+    if (state.phase == ROUND_TRIP_PHASE_IDLE || !state.autoExchange) {
+      stopRoundTripResumeLoop()
+      return
+    }
+    when (state.phase) {
+      ROUND_TRIP_PHASE_AWAITING_JOB -> {
+        if (
+          getTelegramRoots().isNotEmpty() &&
+          isTelegramForegroundForRoundTrip()
+        ) {
+          scheduleRoundTripTelegramFrameRead()
+        }
+      }
+      ROUND_TRIP_PHASE_COLLECTING_FORWARD,
+      ROUND_TRIP_PHASE_COLLECTING_REVERSE -> {
+        val activePackage = getExplicitActiveForegroundPackageForRoundTrip()
+        if (activePackage != null && !isTelegramPackage(activePackage)) {
+          if (!state.collectionInterrupted) {
+            saveRoundTripState(
+              state.copy(collectionInterrupted = true),
+              refreshWidget = false
+            )
+          }
+        } else if (
+          activePackage != null &&
+          isTelegramPackage(activePackage) &&
+          getTelegramRoots().isNotEmpty()
+        ) {
+          scheduleRoundTripTelegramFrameRead()
+        }
+      }
+      ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT -> maybeDeliverCollectedRoundTripToGpt()
+    }
+  }
+
+  private fun scheduleRoundTripTelegramFrameRead() {
+    val phase = loadRoundTripState().phase
+    if (
+      phase != ROUND_TRIP_PHASE_AWAITING_JOB &&
+      phase != ROUND_TRIP_PHASE_COLLECTING_FORWARD &&
+      phase != ROUND_TRIP_PHASE_COLLECTING_REVERSE
+    ) return
+    roundTripFrameHandler.removeCallbacks(roundTripFrameRunnable)
+    roundTripFrameHandler.postDelayed(roundTripFrameRunnable, 180L)
+  }
+
+  private fun collectRoundTripBoundaryLines(
+    node: AccessibilityNodeInfo?,
+    begin: MutableList<Pair<String, String>>,
+    ready: MutableList<Pair<String, String>>
+  ) {
+    if (node == null) return
+
+    fun inspect(raw: CharSequence?) {
+      raw?.toString()
+        ?.replace("\r\n", "\n")
+        ?.replace("\r", "\n")
+        ?.lines()
+        ?.forEach { rawLine ->
+          val line = rawLine.trim()
+          roundTripBeginRegex.matchEntire(line)?.let { match ->
+            val jobId = match.groupValues.getOrNull(1).orEmpty()
+            val sequence = match.groupValues.getOrNull(2).orEmpty()
+            if (jobId.isNotBlank() && sequence.isNotBlank()) {
+              begin.add(jobId to sequence)
+            }
+          }
+          roundTripReadyRegex.matchEntire(line)?.let { match ->
+            val jobId = match.groupValues.getOrNull(1).orEmpty()
+            val sequence = match.groupValues.getOrNull(2).orEmpty()
+            if (jobId.isNotBlank() && sequence.isNotBlank()) {
+              ready.add(jobId to sequence)
+            }
+          }
+        }
+    }
+
+    inspect(node.text)
+    inspect(node.contentDescription)
+    for (index in 0 until node.childCount) {
+      collectRoundTripBoundaryLines(node.getChild(index), begin, ready)
+    }
+  }
+
+  private fun collectRoundTripBoundaries(
+    roots: List<AccessibilityNodeInfo>
+  ): RoundTripBoundarySnapshot {
+    val begin = mutableListOf<Pair<String, String>>()
+    val ready = mutableListOf<Pair<String, String>>()
+    roots.forEach { collectRoundTripBoundaryLines(it, begin, ready) }
+    return RoundTripBoundarySnapshot(begin.distinct(), ready.distinct())
+  }
+
+  private fun stripRoundTripBoundaryLines(text: String): String =
+    text.lines()
+      .filterNot { rawLine ->
+        val line = rawLine.trim()
+        roundTripBeginRegex.matches(line) || roundTripReadyRegex.matches(line)
+      }
+      .joinToString("\n")
+      .trim()
+
+  private fun buildRoundTripFrameText(
+    roots: List<AccessibilityNodeInfo>
+  ): String = stripRoundTripBoundaryLines(
+    collectTelegramMessageCandidates(roots)
+      .map { it.text.replace("\r\n", "\n").replace("\r", "\n").trim() }
+      .filter { it.isNotBlank() }
+      .joinToString("\n")
+      .trim()
+  )
+
+  private fun currentRoundTripText(state: RoundTripState): String =
+    state.collected.joinToString("\n").trim()
+
+  private fun withRoundTripText(state: RoundTripState, text: String): RoundTripState =
+    state.copy(collected = if (text.isBlank()) emptyList() else listOf(text))
+
+  private fun mergeRoundTripTextBidirectional(
+    existingRaw: String,
+    incomingRaw: String
+  ): RoundTripTextMergeResult {
+    fun normalize(value: String): String =
+      value.replace("\r\n", "\n").replace("\r", "\n").trim()
+
+    val existing = normalize(existingRaw)
+    val incoming = normalize(incomingRaw)
+    if (incoming.isBlank()) return RoundTripTextMergeResult(existing, true, false)
+    if (existing.isBlank()) return RoundTripTextMergeResult(incoming, true, true)
+    if (existing == incoming || existing.contains(incoming)) {
+      return RoundTripTextMergeResult(existing, true, false)
+    }
+    if (incoming.contains(existing)) {
+      return RoundTripTextMergeResult(incoming, true, true)
+    }
+
+    val maxOverlap = minOf(existing.length, incoming.length)
+    var forwardOverlap = 0
+    var reverseOverlap = 0
+    for (length in maxOverlap downTo ROUND_TRIP_MIN_TEXT_OVERLAP) {
+      if (forwardOverlap == 0 && existing.regionMatches(existing.length - length, incoming, 0, length)) {
+        forwardOverlap = length
+      }
+      if (reverseOverlap == 0 && incoming.regionMatches(incoming.length - length, existing, 0, length)) {
+        reverseOverlap = length
+      }
+      if (forwardOverlap > 0 || reverseOverlap > 0) break
+    }
+
+    return when {
+      forwardOverlap >= reverseOverlap && forwardOverlap >= ROUND_TRIP_MIN_TEXT_OVERLAP ->
+        RoundTripTextMergeResult(existing + incoming.drop(forwardOverlap), true, true)
+      reverseOverlap >= ROUND_TRIP_MIN_TEXT_OVERLAP ->
+        RoundTripTextMergeResult(incoming.dropLast(reverseOverlap) + existing, true, true)
+      else -> RoundTripTextMergeResult(existing, false, false)
+    }
+  }
+
+  private fun markRoundTripAmbiguous(state: RoundTripState, message: String, reason: String) {
+    appendDebugLog("ROUND_TRIP", "AMBIGUOUS reason=$reason job=${state.jobId}")
+    saveRoundTripState(state.copy(phase = ROUND_TRIP_PHASE_AMBIGUOUS))
+    Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+  }
+
+  private fun saveRoundTripText(
+    state: RoundTripState,
+    incoming: String,
+    complete: Boolean,
+    resetDisconnectedProvisional: Boolean = false
+  ) {
+    val existing = currentRoundTripText(state)
+    val merged = mergeRoundTripTextBidirectional(existing, incoming)
+    val disconnectedProvisional =
+      resetDisconnectedProvisional &&
+        existing.isNotBlank() && incoming.isNotBlank() && !merged.merged
+    val collectedText = if (disconnectedProvisional) {
+      mergeRoundTripTextBidirectional("", incoming).text
+    } else {
+      merged.text
+    }
+    val gap = if (disconnectedProvisional) {
+      false
+    } else {
+      state.gapSuspected ||
+        (existing.isNotBlank() && incoming.isNotBlank() && !merged.merged)
+    }
+    val updated = withRoundTripText(state, collectedText).copy(gapSuspected = gap)
+    if (collectedText.length > ROUND_TRIP_MAX_COLLECTED_CHARS) {
+      markRoundTripAmbiguous(
+        updated,
+        "완료보고 수집 크기 제한을 초과했습니다.",
+        "sizeLimit"
+      )
+      return
+    }
+    if (complete) {
+      if (gap) {
+        markRoundTripAmbiguous(
+          updated,
+          "완료보고 수집 중 화면 연결이 끊긴 구간이 있어 자동 전달하지 않습니다.",
+          "gapSuspected"
+        )
+      } else if (collectedText.isBlank()) {
+        markRoundTripAmbiguous(updated, "수집된 완료보고가 없습니다.", "emptyResult")
+      } else {
+        saveRoundTripState(updated.copy(phase = ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT))
+        maybeDeliverCollectedRoundTripToGpt()
+      }
+    } else {
+      saveRoundTripState(updated)
+    }
+  }
+
+  private fun processRoundTripTelegramFrame() {
+    var state = loadRoundTripState()
+    if (!state.autoExchange) return
+    if (
+      state.phase != ROUND_TRIP_PHASE_AWAITING_JOB &&
+      state.phase != ROUND_TRIP_PHASE_COLLECTING_FORWARD &&
+      state.phase != ROUND_TRIP_PHASE_COLLECTING_REVERSE
+    ) return
+    val roots = getTelegramRoots()
+    if (roots.isEmpty()) return
+    if (state.collectionInterrupted) {
+      state = state.copy(
+        phase = ROUND_TRIP_PHASE_AWAITING_JOB,
+        direction = "",
+        collected = emptyList(),
+        gapSuspected = false,
+        collectionInterrupted = false
+      )
+      lastRoundTripFrameSignature = ""
+      saveRoundTripState(state)
+      appendDebugLog(
+        "ROUND_TRIP",
+        "COLLECTION_RESTART_AFTER_INTERRUPTION job=${state.jobId} sequence=${state.sequence}"
+      )
+    }
+    val boundaries = collectRoundTripBoundaries(roots)
+    val frameText = buildRoundTripFrameText(roots)
+    val signature = listOf(
+      frameText,
+      boundaries.beginMarkers.sortedBy { it.first + it.second }.joinToString(","),
+      boundaries.readyMarkers.sortedBy { it.first + it.second }.joinToString(",")
+    ).joinToString("\u001F")
+    if (signature.isBlank() || signature == lastRoundTripFrameSignature) return
+    lastRoundTripFrameSignature = signature
+    val boundaryIdentities =
+      (boundaries.beginMarkers + boundaries.readyMarkers).toSet()
+
+    if (state.phase == ROUND_TRIP_PHASE_AWAITING_JOB) {
+      val retainedIdentity = if (
+        state.jobId.isNotBlank() && state.sequence.isNotBlank()
+      ) {
+        state.jobId to state.sequence
+      } else {
+        null
+      }
+      val retainedIdentityConflict = retainedIdentity?.let { expected ->
+        boundaryIdentities.firstOrNull { it != expected }
+      }
+      if (retainedIdentityConflict != null) {
+        markRoundTripAmbiguous(
+          state,
+          "다른 완료보고 경계가 감지되어 자동 수집을 중단했습니다.",
+          "foreignReportAfterInterruption:${retainedIdentityConflict.first}:${retainedIdentityConflict.second}"
+        )
+        return
+      }
+      if (boundaryIdentities.size > 1) {
+        markRoundTripAmbiguous(state, "다른 완료보고 경계가 감지되어 자동 수집을 중단했습니다.", "multipleReportIdentities")
+        return
+      }
+      val samePair = boundaries.beginMarkers.firstOrNull { marker ->
+        boundaries.readyMarkers.contains(marker) &&
+          (retainedIdentity == null || marker == retainedIdentity)
+      }
+      if (samePair != null) {
+        saveRoundTripText(
+          state.copy(jobId = samePair.first, sequence = samePair.second),
+          frameText,
+          true,
+          resetDisconnectedProvisional = true
+        )
+        return
+      }
+      val begin = boundaries.beginMarkers.firstOrNull { marker ->
+        retainedIdentity == null || marker == retainedIdentity
+      }
+      val ready = boundaries.readyMarkers.firstOrNull { marker ->
+        retainedIdentity == null || marker == retainedIdentity
+      }
+      if (begin != null) {
+        saveRoundTripText(
+          state.copy(
+            phase = ROUND_TRIP_PHASE_COLLECTING_FORWARD,
+            jobId = begin.first,
+            sequence = begin.second,
+            direction = "FORWARD"
+          ),
+          frameText,
+          false,
+          resetDisconnectedProvisional = true
+        )
+      } else if (ready != null) {
+        saveRoundTripText(
+          state.copy(
+            phase = ROUND_TRIP_PHASE_COLLECTING_REVERSE,
+            jobId = ready.first,
+            sequence = ready.second,
+            direction = "REVERSE"
+          ),
+          frameText,
+          false,
+          resetDisconnectedProvisional = true
+        )
+      } else {
+        saveRoundTripText(state, frameText, false)
+      }
+      return
+    }
+
+    val expectedIdentity = state.jobId to state.sequence
+    val foreign = boundaryIdentities.firstOrNull { it != expectedIdentity }
+    if (foreign != null) {
+      markRoundTripAmbiguous(
+        state,
+        "다른 완료보고 경계가 감지되어 자동 수집을 중단했습니다.",
+        "foreignReport:${foreign.first}:${foreign.second}"
+      )
+      return
+    }
+    if (state.phase == ROUND_TRIP_PHASE_COLLECTING_FORWARD) {
+      val ready = boundaries.readyMarkers.firstOrNull { it == expectedIdentity }
+      saveRoundTripText(
+        state,
+        frameText,
+        ready != null
+      )
+    } else {
+      val beginFound = boundaries.beginMarkers.contains(expectedIdentity)
+      saveRoundTripText(state, frameText, beginFound)
+    }
+  }
+
+  private fun maybeDeliverCollectedRoundTripToGpt() {
+    val state = loadRoundTripState()
+    if (state.phase != ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT || !state.autoExchange) return
+    val aiRoots = getAiRoots()
+    val tgRoots = getTelegramRoots()
+    if (aiRoots.isEmpty() || tgRoots.isEmpty()) return
+    if (isGptDefinitelyBusyForReservation(aiRoots)) return
+    val edit = findAiEditableWithRetryForTgToGpt(aiRoots).first ?: return
+    if (!edit.text?.toString().orEmpty().isBlank()) return
+    deliverCollectedRoundTripToGpt()
+  }
+
+  private fun deliverCollectedRoundTripToGpt() {
+    val state = loadRoundTripState()
+    if (
+      state.phase != ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT ||
+      !state.autoExchange || state.gapSuspected || state.collected.isEmpty()
+    ) return
+    val text = state.collected.joinToString("\n\n").trim()
+    if (text.isBlank()) {
+      saveRoundTripState(state.copy(phase = ROUND_TRIP_PHASE_AMBIGUOUS))
+      return
+    }
+    saveRoundTripState(state.copy(phase = ROUND_TRIP_PHASE_GPT_DELIVERING))
+    finishTelegramToGptWithSelectedTexts(
+      context = this,
+      copyMode = COPY_MODE_FULL,
+      autoSend = true,
+      selectedTexts = listOf(text),
+      onSendResult = { result ->
+        if (result == TgToGptSendResult.VERIFIED) {
+          clearRoundTripState("roundTripDelivered")
+        } else {
+          saveRoundTripState(loadRoundTripState().copy(phase = ROUND_TRIP_PHASE_AMBIGUOUS))
+        }
+      }
+    )
   }
 
   private fun saveBridgeStatusForWidget(
@@ -2950,17 +3634,16 @@ override fun onServiceConnected() {
       return false
     }
     appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE target label=${compactLogPreview(target.label)} top=${target.top} left=${target.left} isCode=${target.isCodeCopy}")
-    val fullPasteSentinel = "COPYBRIDGE_GPT_COPY_SENTINEL_${System.currentTimeMillis()}"
-
     if (gptOutputMode == "FULL") {
+        val copySentinel = "COPYBRIDGE_GPT_COPY_SENTINEL_${System.currentTimeMillis()}"
 
-        copyToClipboard(fullPasteSentinel)
+        copyToClipboard(copySentinel)
 
         appendDebugLog(
 
             "GPT→TG",
 
-            "COPY_BUTTON_FULL_SENTINEL_SET length=${fullPasteSentinel.length}"
+            "COPY_BUTTON_FULL_SENTINEL_SET length=${copySentinel.length}"
 
         )
 
@@ -3056,7 +3739,9 @@ override fun onServiceConnected() {
       }
     }
     if (!pasted || !pasteValid) return false
-    if (autoSend) { scheduleAutoSendAfterPaste("GPT→TG:$gptOutputMode:copyButtonPaste", tgEdit) } else { Toast.makeText(this, "Telegram 입력창에 넣었습니다.", Toast.LENGTH_SHORT).show() }
+    if (autoSend) {
+      scheduleAutoSendAfterPaste("GPT→TG:$gptOutputMode:copyButtonPaste", tgEdit)
+    } else { Toast.makeText(this, "Telegram 입력창에 넣었습니다.", Toast.LENGTH_SHORT).show() }
     return true
   }
 
@@ -4081,7 +4766,8 @@ override fun onServiceConnected() {
     context: Context,
     copyMode: String,
     autoSend: Boolean,
-    selectedTexts: List<String>
+    selectedTexts: List<String>,
+    onSendResult: ((TgToGptSendResult) -> Unit)? = null
   ): Boolean {
     val textToSend = selectedTexts.joinToString("\n")
     appendDebugLog(
@@ -4105,6 +4791,7 @@ override fun onServiceConnected() {
         "ChatGPT 창을 찾지 못했습니다. 원문은 클립보드에 보관했습니다.",
         Toast.LENGTH_LONG
       ).show()
+      onSendResult?.invoke(TgToGptSendResult.FAILED)
       return true
     }
 
@@ -4131,6 +4818,7 @@ override fun onServiceConnected() {
         "ChatGPT 입력에 실패했습니다. 원문은 클립보드에 보관했습니다.",
         Toast.LENGTH_LONG
       ).show()
+      onSendResult?.invoke(TgToGptSendResult.FAILED)
       return true
     }
 
@@ -4141,11 +4829,13 @@ override fun onServiceConnected() {
         "GPT 입력창에 넣었습니다(전체: ${actualCount}개).",
         Toast.LENGTH_SHORT
       ).show()
+      onSendResult?.invoke(TgToGptSendResult.ISSUED_UNVERIFIED)
       return true
     }
 
     Handler(Looper.getMainLooper()).postDelayed({
-      when (sendChatGptForTgToGpt(textToSend)) {
+      val result = sendChatGptForTgToGpt(textToSend)
+      when (result) {
         TgToGptSendResult.VERIFIED -> {
           Toast.makeText(
             context,
@@ -4168,6 +4858,7 @@ override fun onServiceConnected() {
           ).show()
         }
       }
+      onSendResult?.invoke(result)
     }, 300L)
     return true
   }
@@ -4194,9 +4885,78 @@ override fun onServiceConnected() {
     private const val YOUTUBE_SOURCE_SCAN_THROTTLE_MS = 300L
     private const val YOUTUBE_FULL_SCAN_THROTTLE_MS = 750L
     private const val YOUTUBE_SKIP_CLICK_COOLDOWN_MS = 1200L
+    const val ROUND_TRIP_PHASE_IDLE = "IDLE"
+    const val ROUND_TRIP_PHASE_GPT_RESERVED = "GPT_RESERVED"
+    const val ROUND_TRIP_PHASE_GPT_TO_TG_SENDING = "GPT_TO_TG_SENDING"
+    const val ROUND_TRIP_PHASE_AWAITING_JOB = "AWAITING_JOB"
+    const val ROUND_TRIP_PHASE_COLLECTING_FORWARD = "COLLECTING_FORWARD"
+    const val ROUND_TRIP_PHASE_COLLECTING_REVERSE = "COLLECTING_REVERSE"
+    const val ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT = "GPT_DELIVERY_WAIT"
+    const val ROUND_TRIP_PHASE_GPT_DELIVERING = "GPT_DELIVERING"
+    const val ROUND_TRIP_PHASE_AMBIGUOUS = "AMBIGUOUS"
+    private const val ROUND_TRIP_PREFS = "copybridge_round_trip_state"
+    private const val ROUND_TRIP_KEY_PHASE = "phase"
+    private const val ROUND_TRIP_KEY_JOB_ID = "job_id"
+    private const val ROUND_TRIP_KEY_SEQUENCE = "sequence"
+    private const val ROUND_TRIP_KEY_DIRECTION = "direction"
+    private const val ROUND_TRIP_KEY_COLLECTED = "collected_json"
+    private const val ROUND_TRIP_KEY_GAP = "gap_suspected"
+    private const val ROUND_TRIP_KEY_COLLECTION_INTERRUPTED =
+      "collection_interrupted"
+    private const val ROUND_TRIP_KEY_AUTO_EXCHANGE = "auto_exchange"
+    private const val ROUND_TRIP_KEY_MODE = "gpt_mode"
+    private const val ROUND_TRIP_KEY_AUTO_SEND = "auto_send"
+    private const val ROUND_TRIP_KEY_CREATED_AT = "created_at"
+    private const val GPT_TO_TG_RESERVATION_MAX_AGE_MS = 12 * 60 * 60 * 1000L
+    private const val ROUND_TRIP_MAX_COLLECTED_BLOCKS = 2000
+    private const val ROUND_TRIP_MAX_COLLECTED_CHARS = 300_000
+    private const val ROUND_TRIP_MIN_TEXT_OVERLAP = 32
+    private val roundTripJobRegex = Regex("^Job:\\s*(J\\d{4,}-\\d{6}-\\d{2})$")
+    private val roundTripBeginRegex = Regex(
+      "^CTB_REPORT_BEGIN\\s+(J\\d{4,}-\\d{6}-\\d{2})\\s+(R[1-9]\\d*)$"
+    )
+    private val roundTripReadyRegex = Regex(
+      "^CTB_REPORT_READY\\s+(J\\d{4,}-\\d{6}-\\d{2})\\s+(R[1-9]\\d*)$"
+    )
     const val COPY_MODE_FULL = "FULL"
     const val COPY_MODE_LAST = "LAST"
     private var activeService: CopyBridgeAccessibilityService? = null
+
+    data class RoundTripUiState(
+      val phase: String,
+      val jobId: String,
+      val collectedCount: Int,
+      val gapSuspected: Boolean,
+      val autoExchange: Boolean
+    )
+
+    fun getRoundTripUiState(context: Context): RoundTripUiState {
+      val prefs = context.getSharedPreferences(ROUND_TRIP_PREFS, Context.MODE_PRIVATE)
+      val count = try {
+        JSONArray(prefs.getString(ROUND_TRIP_KEY_COLLECTED, "[]").orEmpty()).length()
+      } catch (_: Exception) {
+        0
+      }
+      return RoundTripUiState(
+        phase = prefs.getString(ROUND_TRIP_KEY_PHASE, ROUND_TRIP_PHASE_IDLE)
+          ?: ROUND_TRIP_PHASE_IDLE,
+        jobId = prefs.getString(ROUND_TRIP_KEY_JOB_ID, "").orEmpty(),
+        collectedCount = count,
+        gapSuspected = prefs.getBoolean(ROUND_TRIP_KEY_GAP, false),
+        autoExchange = prefs.getBoolean(ROUND_TRIP_KEY_AUTO_EXCHANGE, false)
+      )
+    }
+
+    fun isCurrentRoundTripAutoExchange(context: Context): Boolean =
+      getRoundTripUiState(context).phase != ROUND_TRIP_PHASE_IDLE &&
+        getRoundTripUiState(context).autoExchange
+
+    fun cancelCurrentAutoExchange(context: Context): Boolean {
+      val service = activeService ?: return false
+      if (!isCurrentRoundTripAutoExchange(context)) return false
+      service.cancelRoundTrip("autoExchangeToggledOff")
+      return true
+    }
 
     fun isServiceActive(): Boolean = activeService != null
 
@@ -4556,6 +5316,7 @@ if (textToSend.isBlank()) {
         if (autoSend) {
           service.scheduleAutoSendAfterPaste("GPT→TG", tgEdit)
         } else {
+          service.clearRoundTripState("telegramInputCompletedWithoutAutoSend")
           Toast.makeText(context, "Telegram 입력창에 넣었습니다.", Toast.LENGTH_SHORT).show()
         }
       } else {
@@ -4570,13 +5331,66 @@ if (textToSend.isBlank()) {
       context: Context,
       gptOutputMode: String,
       autoSend: Boolean
+    ): Boolean = requestGptToTelegram(
+      context,
+      gptOutputMode,
+      autoSend,
+      false
+    )
+
+    fun requestGptToTelegram(
+      context: Context,
+      gptOutputMode: String,
+      autoSend: Boolean,
+      autoExchange: Boolean
     ): Boolean {
       val service = activeService
       if (service == null) {
         Toast.makeText(context, "CopyBridge 접근성 권한을 먼저 켜주세요.", Toast.LENGTH_SHORT).show()
         return false
       }
-      return service.requestGptToTelegramWithReservation(context, gptOutputMode, autoSend)
+      return service.requestGptToTelegramWithReservation(
+        context,
+        gptOutputMode,
+        autoSend,
+        autoExchange
+      )
+    }
+
+    fun requestOrCancelGptToTelegramFromWidget(
+      context: Context,
+      gptOutputMode: String,
+      autoSend: Boolean,
+      autoExchange: Boolean
+    ): Boolean {
+      val service = activeService
+      if (service == null) {
+        Toast.makeText(context, "CopyBridge 접근성 권한을 먼저 켜주세요.", Toast.LENGTH_SHORT).show()
+        return false
+      }
+      return when (service.loadRoundTripState().phase) {
+        ROUND_TRIP_PHASE_IDLE -> service.requestGptToTelegramWithReservation(
+          context,
+          gptOutputMode,
+          autoSend,
+          autoExchange
+        )
+        ROUND_TRIP_PHASE_GPT_RESERVED,
+        ROUND_TRIP_PHASE_AWAITING_JOB,
+        ROUND_TRIP_PHASE_COLLECTING_FORWARD,
+        ROUND_TRIP_PHASE_COLLECTING_REVERSE,
+        ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT,
+        ROUND_TRIP_PHASE_AMBIGUOUS -> {
+          service.cancelRoundTrip("widgetReclick")
+          true
+        }
+        ROUND_TRIP_PHASE_GPT_TO_TG_SENDING,
+        ROUND_TRIP_PHASE_GPT_DELIVERING -> {
+          Toast.makeText(context, "현재 전송 처리 중입니다.", Toast.LENGTH_SHORT).show()
+          true
+        }
+        else -> false
+      }
     }
 
     fun requestGptCodeToTelegram(context: Context, autoSend: Boolean): Boolean =

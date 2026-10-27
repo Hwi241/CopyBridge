@@ -45,6 +45,7 @@ class FloatingWidgetService : Service() {
 
   private var widgetSize = WidgetSize.SMALL
   private var autoSendEnabled = false
+  private var autoExchangeEnabled = false
   private var replyCopyModeString: String = "FULL"
   private var gptOutputModeString: String = "FULL"
   private var isCollapsed = false
@@ -141,6 +142,7 @@ class FloatingWidgetService : Service() {
     val savedSizeLabel = prefs.getString(KEY_WIDGET_SIZE, WidgetSize.SMALL.label)
     widgetSize = WidgetSize.entries.firstOrNull { it.label == savedSizeLabel } ?: WidgetSize.SMALL
     autoSendEnabled = prefs.getBoolean(KEY_AUTO_SEND_ENABLED, false)
+    autoExchangeEnabled = prefs.getBoolean(KEY_AUTO_EXCHANGE_ENABLED, false)
     replyCopyModeString = prefs.getString(KEY_REPLY_COPY_MODE, "FULL") ?: "FULL"
     gptOutputModeString = when (prefs.getString(KEY_GPT_OUTPUT_MODE, "FULL")) {
       "CODE" -> "CODE"
@@ -156,6 +158,7 @@ class FloatingWidgetService : Service() {
     prefs.edit()
       .putString(KEY_WIDGET_SIZE, widgetSize.label)
       .putBoolean(KEY_AUTO_SEND_ENABLED, autoSendEnabled)
+      .putBoolean(KEY_AUTO_EXCHANGE_ENABLED, autoExchangeEnabled)
       .putString(KEY_REPLY_COPY_MODE, replyCopyModeString)
       .putString(KEY_GPT_OUTPUT_MODE, gptOutputModeString)
       .putBoolean(KEY_WIDGET_COLLAPSED, isCollapsed)
@@ -364,6 +367,7 @@ class FloatingWidgetService : Service() {
 
   private fun createWidgetView(): View {
     val (gptBusy, telegramTyping, bridgeStatusText) = loadBridgeStatusForWidget()
+    val roundTrip = CopyBridgeAccessibilityService.getRoundTripUiState(this)
     val isBridgeBusy = gptBusy || telegramTyping
     val size = widgetSize
 
@@ -473,6 +477,20 @@ class FloatingWidgetService : Service() {
       isAllCaps = false
     }
 
+    val autoExchangeLabel = if (autoExchangeEnabled) {
+      "답변 자동 주고받기: 켬"
+    } else {
+      "답변 자동 주고받기: 끔"
+    }
+    val autoExchangeButton = createDarkButton(autoExchangeLabel, size.buttonTextSize) {
+      if (autoExchangeEnabled && CopyBridgeAccessibilityService.isCurrentRoundTripAutoExchange(this)) {
+        CopyBridgeAccessibilityService.cancelCurrentAutoExchange(this)
+      }
+      autoExchangeEnabled = !autoExchangeEnabled
+      saveWidgetPreferences()
+      refreshWidgetAtSamePosition()
+    }
+
     val gptButton = createWhiteButton("GPT로 보내기", size.buttonTextSize) {
             appendDebugLog("WIDGET", "tap GPT로 보내기 replyMode=$replyCopyModeString autoSend=$autoSendEnabled")
       runTelegramToGptSmart("normal")
@@ -483,9 +501,22 @@ class FloatingWidgetService : Service() {
     apiBalanceTextView = apiBalanceBox
     updateApiBalanceBoxText()
 
-    val tgButton = createTelegramBlueButton("텔레그램으로 보내기", size.buttonTextSize) {
-      appendDebugLog("WIDGET", "tap 텔레그램으로 보내기 gptMode=$gptOutputModeString autoSend=$autoSendEnabled")
-      CopyBridgeAccessibilityService.requestGptToTelegram(this, gptOutputModeString, autoSendEnabled)
+    val tgButton = createTelegramBlueButton(roundTripTelegramButtonLabel(roundTrip), size.buttonTextSize) {
+      appendDebugLog("WIDGET", "tap 텔레그램으로 보내기 gptMode=$gptOutputModeString autoSend=$autoSendEnabled autoExchange=$autoExchangeEnabled")
+      if (autoExchangeEnabled && !autoSendEnabled && roundTrip.phase == CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_IDLE) {
+        Toast.makeText(
+          this,
+          "답변 자동 주고받기는 '전송: 켬' 상태에서 사용할 수 있습니다.",
+          Toast.LENGTH_SHORT
+        ).show()
+      } else {
+        CopyBridgeAccessibilityService.requestOrCancelGptToTelegramFromWidget(
+          this,
+          gptOutputModeString,
+          autoSendEnabled,
+          autoExchangeEnabled
+        )
+      }
     }
 
     panel.addView(header, LinearLayout.LayoutParams(size.contentWidth, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 10 })
@@ -494,6 +525,7 @@ class FloatingWidgetService : Service() {
     panel.addView(replyCopyButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply { bottomMargin = 10 })
     panel.addView(tgButton, LinearLayout.LayoutParams(size.contentWidth, size.buttonHeight).apply { bottomMargin = 10 })
     panel.addView(gptOutputButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply { bottomMargin = 10 })
+    panel.addView(autoExchangeButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight).apply { bottomMargin = 10 })
     panel.addView(autoSendButton, LinearLayout.LayoutParams(size.contentWidth, size.toggleHeight))
     panel.addView(createBridgeStatusTextView(bridgeStatusText))
 
@@ -507,6 +539,7 @@ class FloatingWidgetService : Service() {
     telegramTyping: Boolean,
     bridgeStatusText: String
   ): View {
+    val roundTrip = CopyBridgeAccessibilityService.getRoundTripUiState(this)
     val isBridgeBusy = gptBusy || telegramTyping
     val size = WidgetSize.COMPACT
     val telegramBlueColor = Color.parseColor("#BFEAFF")
@@ -566,9 +599,22 @@ class FloatingWidgetService : Service() {
       runTelegramToGptSmart("ss")
     }
 
-    val tgButton = createTelegramBlueButton("T", 22f) {
-      appendDebugLog("WIDGET", "tap SS T gptMode=$gptOutputModeString autoSend=$autoSendEnabled")
-      CopyBridgeAccessibilityService.requestGptToTelegram(this, gptOutputModeString, autoSendEnabled)
+    val tgButton = createTelegramBlueButton(roundTripTelegramButtonLabel(roundTrip, compact = true), 22f) {
+      appendDebugLog("WIDGET", "tap SS T gptMode=$gptOutputModeString autoSend=$autoSendEnabled autoExchange=$autoExchangeEnabled")
+      if (autoExchangeEnabled && !autoSendEnabled && roundTrip.phase == CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_IDLE) {
+        Toast.makeText(
+          this,
+          "답변 자동 주고받기는 '전송: 켬' 상태에서 사용할 수 있습니다.",
+          Toast.LENGTH_SHORT
+        ).show()
+      } else {
+        CopyBridgeAccessibilityService.requestOrCancelGptToTelegramFromWidget(
+          this,
+          gptOutputModeString,
+          autoSendEnabled,
+          autoExchangeEnabled
+        )
+      }
     }
 
     panel.addView(
@@ -631,8 +677,13 @@ class FloatingWidgetService : Service() {
    }
    CopyBridgeKeyboardShortcutBridge.ACTION_GPT_TO_TELEGRAM -> {
     val shortcutGptMode = if (gptOutputModeString == "CODE") "CODE" else "FULL"
-    appendDebugLog("SHORTCUT", "hardware Ctrl+Shift+Enter -> 텔레그램으로 보내기 gptMode=$shortcutGptMode autoSend=$autoSendEnabled")
-    CopyBridgeAccessibilityService.requestGptToTelegram(this, shortcutGptMode, autoSendEnabled)
+    appendDebugLog("SHORTCUT", "hardware Ctrl+Shift+Enter -> 텔레그램으로 보내기 gptMode=$shortcutGptMode autoSend=$autoSendEnabled autoExchange=$autoExchangeEnabled")
+    CopyBridgeAccessibilityService.requestGptToTelegram(
+      this,
+      shortcutGptMode,
+      autoSendEnabled,
+      autoExchangeEnabled
+    )
     true
    }
    else -> false
@@ -1093,7 +1144,10 @@ class FloatingWidgetService : Service() {
     val gptBusy = prefs.getBoolean("gpt_busy", false)
     val telegramTyping = prefs.getBoolean("telegram_typing", false)
 
-    val statusText = when {
+    val roundTrip = CopyBridgeAccessibilityService.getRoundTripUiState(this)
+    val statusText = if (roundTrip.phase != CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_IDLE) {
+      roundTripStatusLabel(roundTrip)
+    } else when {
       gptBusy && telegramTyping -> "\u23F3 \uC791\uC131 \uC911..."
       gptBusy -> "\u23F3 GPT \uC791\uC131 \uC911..."
       telegramTyping -> "\u23F3 OpenClaw \uC791\uC131 \uC911..."
@@ -1106,6 +1160,60 @@ class FloatingWidgetService : Service() {
     )
 
     return Triple(gptBusy, telegramTyping, statusText)
+  }
+
+  private fun shortJobId(jobId: String): String =
+    jobId.substringBefore("-").ifBlank { "작업" }
+
+  private fun roundTripTelegramButtonLabel(
+    state: CopyBridgeAccessibilityService.Companion.RoundTripUiState,
+    compact: Boolean = false
+  ): String {
+    val job = shortJobId(state.jobId)
+    return when (state.phase) {
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_GPT_RESERVED ->
+        if (compact) "예약" else "예약중… · 취소"
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_GPT_TO_TG_SENDING ->
+        if (compact) "전송" else "전송중…"
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_AWAITING_JOB ->
+        if (compact) "대기" else if (state.collectedCount > 0) {
+          "경계 찾는 중 · 취소"
+        } else {
+          "답변 기다리는 중 · 취소"
+        }
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_COLLECTING_FORWARD ->
+        if (compact) "수집↓" else "$job 수집중↓ · 취소"
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_COLLECTING_REVERSE ->
+        if (compact) "수집↑" else "$job 수집중↑ · 취소"
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT ->
+        if (compact) "GPT" else "$job GPT 전달대기 · 취소"
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_GPT_DELIVERING ->
+        if (compact) "전달" else "GPT 전달중…"
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_AMBIGUOUS ->
+        if (compact) "확인" else "$job 확인 필요 · 취소"
+      else -> if (compact) "T" else "텔레그램으로 보내기"
+    }
+  }
+
+  private fun roundTripStatusLabel(
+    state: CopyBridgeAccessibilityService.Companion.RoundTripUiState
+  ): String {
+    val job = shortJobId(state.jobId)
+    val gap = if (state.gapSuspected) " · 누락 가능" else ""
+    return when (state.phase) {
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_GPT_RESERVED -> "⏳ Telegram 전송 예약중"
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_GPT_TO_TG_SENDING -> "⏳ Telegram 전송중"
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_AWAITING_JOB ->
+        if (state.collectedCount > 0) "⏳ Telegram 경계 찾는 중" else "⏳ Telegram 답변 대기"
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_COLLECTING_FORWARD ->
+        "⏳ $job 수집중 ↓$gap"
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_COLLECTING_REVERSE ->
+        "⏳ $job 수집중 ↑$gap"
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT -> "⏳ $job GPT 전달대기"
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_GPT_DELIVERING -> "⏳ GPT 전달중"
+      CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_AMBIGUOUS -> "⚠️ $job 확인 필요$gap"
+      else -> "✅ 대기 중"
+    }
   }
 
   private fun createBridgeStatusTextView(statusText: String): TextView {
@@ -1272,6 +1380,7 @@ class FloatingWidgetService : Service() {
     private const val PREFS_NAME = "copybridge_floating_widget"
     private const val KEY_WIDGET_SIZE = "widget_size"
     private const val KEY_AUTO_SEND_ENABLED = "auto_send_enabled"
+    private const val KEY_AUTO_EXCHANGE_ENABLED = "auto_exchange_enabled"
     private const val KEY_REPLY_COPY_MODE = "reply_copy_mode"
     private const val KEY_GPT_OUTPUT_MODE = "gpt_output_mode"
     private const val KEY_WIDGET_COLLAPSED = "widget_collapsed"
