@@ -62,6 +62,9 @@ export default function App() {
   const [deepSeekApiKey, setDeepSeekApiKey] = useState('');
   const [deepSeekKeyStatus, setDeepSeekKeyStatus] = useState('$KEY');
   const [deepSeekBalanceStatus, setDeepSeekBalanceStatus] = useState('$KEY');
+  const [relayReadTokenInput, setRelayReadTokenInput] = useState('');
+  const [relayReadTokenStatus, setRelayReadTokenStatus] = useState('checking');
+  const [relayReadTokenSaving, setRelayReadTokenSaving] = useState(false);
   const [apiUsageHourOffset, setApiUsageHourOffset] = useState(0);
   const [apiUsageRecords, setApiUsageRecords] = useState([]);
   const [youtubeAutoSkipEnabled, setYoutubeAutoSkipEnabled] = useState(true);
@@ -265,6 +268,34 @@ const loadKeyboardShortcutSettings = useCallback(async () => {
     );
   };
 
+  const loadRelayReadTokenStatus = useCallback(async () => {
+    const nativeModule = getNativeModule();
+
+    if (
+      Platform.OS !== 'android' ||
+      !nativeModule ||
+      typeof nativeModule.getRelayReadTokenStatus !== 'function'
+    ) {
+      setRelayReadTokenStatus('unavailable');
+      return;
+    }
+
+    try {
+      const status = await nativeModule.getRelayReadTokenStatus();
+
+      if (typeof status?.hasToken !== 'boolean') {
+        setRelayReadTokenStatus('error');
+        return;
+      }
+
+      setRelayReadTokenStatus(
+        status.hasToken ? 'saved' : 'missing'
+      );
+    } catch (_error) {
+      setRelayReadTokenStatus('error');
+    }
+  }, []);
+
   const loadDeepSeekSettings = useCallback(async () => {
     const nativeModule = getNativeModule();
     if (Platform.OS !== 'android' || !nativeModule || typeof nativeModule.getDeepSeekApiKeyStatus !== 'function') {
@@ -286,6 +317,70 @@ const loadKeyboardShortcutSettings = useCallback(async () => {
       setDeepSeekBalanceStatus('$KEY');
     }
   }, []);
+
+  const saveRelayReadToken = async () => {
+    if (relayReadTokenSaving) return;
+
+    const token = relayReadTokenInput.trim();
+
+    // 입력창의 토큰을 즉시 비운다.
+    setRelayReadTokenInput('');
+
+    if (!token) {
+      Alert.alert(
+        '입력 필요',
+        'Cloudflare READ_TOKEN을 입력해주세요.'
+      );
+      return;
+    }
+
+    if (token.length < 24 || token.length > 256) {
+      Alert.alert(
+        '입력 확인',
+        'READ_TOKEN은 24~256자로 입력해주세요.'
+      );
+      return;
+    }
+
+    const nativeModule = getNativeModule();
+
+    if (
+      Platform.OS !== 'android' ||
+      !nativeModule ||
+      typeof nativeModule.saveRelayReadToken !== 'function'
+    ) {
+      Alert.alert(
+        '네이티브 연결 필요',
+        'READ_TOKEN 저장은 최신 Android APK에서 사용할 수 있습니다.'
+      );
+      return;
+    }
+
+    setRelayReadTokenSaving(true);
+
+    try {
+      const saved = await nativeModule.saveRelayReadToken(token);
+
+      if (saved !== true) {
+        throw new Error('Relay token save failed');
+      }
+
+      setRelayReadTokenStatus('saved');
+      Alert.alert(
+        '저장 완료',
+        'Cloudflare READ_TOKEN을 안전하게 저장했습니다.'
+      );
+    } catch (_error) {
+      Alert.alert(
+        '저장 실패',
+        'READ_TOKEN을 저장하지 못했습니다. 다시 확인해주세요.'
+      );
+    } finally {
+      setRelayReadTokenInput('');
+      setRelayReadTokenSaving(false);
+      loadRelayReadTokenStatus();
+    }
+  };
 
   const saveDeepSeekApiKey = async () => {
     const nativeModule = getNativeModule();
@@ -533,9 +628,18 @@ const loadKeyboardShortcutSettings = useCallback(async () => {
     loadOpacitySettings();
     loadKeyboardShortcutSettings();
     loadDeepSeekSettings();
+    loadRelayReadTokenStatus();
     loadApiUsageRecords();
     loadYouTubeAutoSkipSetting();
-  }, [loadDebugLogs, loadOpacitySettings, loadKeyboardShortcutSettings, loadDeepSeekSettings, loadApiUsageRecords, loadYouTubeAutoSkipSetting]);
+  }, [
+    loadDebugLogs,
+    loadOpacitySettings,
+    loadKeyboardShortcutSettings,
+    loadDeepSeekSettings,
+    loadRelayReadTokenStatus,
+    loadApiUsageRecords,
+    loadYouTubeAutoSkipSetting
+  ]);
 
   useEffect(() => {
     if (!keyboardShortcutCaptureAction) return undefined;
@@ -813,6 +917,64 @@ const loadKeyboardShortcutSettings = useCallback(async () => {
               {youtubeAutoSkipEnabled ? '켜짐' : '꺼짐'}
             </Text>
           </TouchableOpacity>
+        </View>
+
+        <View style={styles.deepSeekCard}>
+          <Text style={styles.sectionTitle}>
+            Cloudflare 보고서 연결
+          </Text>
+
+          <Text style={styles.deepSeekDescription}>
+            Codex 완료보고를 Cloudflare에서 직접 가져오기 위한
+            READ_TOKEN을 설정합니다. 토큰은 Android Keystore로
+            보호됩니다. 자동 보고서 조회는 다음 단계에서 연결됩니다.
+          </Text>
+
+          <TextInput
+            style={styles.deepSeekInput}
+            value={relayReadTokenInput}
+            onChangeText={setRelayReadTokenInput}
+            placeholder="Cloudflare READ_TOKEN 입력"
+            placeholderTextColor="#9A9288"
+            autoCapitalize="none"
+            autoCorrect={false}
+            autoComplete="off"
+            secureTextEntry
+            maxLength={256}
+            editable={!relayReadTokenSaving}
+          />
+
+          <View style={styles.deepSeekButtonRow}>
+            <TouchableOpacity
+              style={styles.deepSeekButton}
+              activeOpacity={0.8}
+              disabled={
+                relayReadTokenSaving ||
+                !relayReadTokenInput.trim()
+              }
+              onPress={saveRelayReadToken}
+            >
+              <Text style={styles.deepSeekButtonText}>
+                {relayReadTokenSaving
+                  ? '저장 중'
+                  : 'READ_TOKEN 저장'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <Text style={styles.deepSeekKeyStatus}>
+            READ_TOKEN 상태: {
+              relayReadTokenStatus === 'saved'
+                ? '암호화 저장됨'
+                : relayReadTokenStatus === 'missing'
+                  ? '미설정'
+                  : relayReadTokenStatus === 'checking'
+                    ? '확인 중'
+                    : relayReadTokenStatus === 'unavailable'
+                      ? 'Android 네이티브 연결 필요'
+                      : '상태 확인 실패'
+            }
+          </Text>
         </View>
 
         <View style={styles.deepSeekCard}>

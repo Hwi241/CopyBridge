@@ -54,8 +54,14 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   private val roundTripFrameHandler = Handler(Looper.getMainLooper())
   private val roundTripFrameRunnable = Runnable { processRoundTripTelegramFrame() }
   private var lastRoundTripFrameSignature = ""
+  private var roundTripJobBaseline: Set<String>? = null
+  private var roundTripJobBaselineCreatedAtMs = 0L
   private val roundTripResumeHandler = Handler(Looper.getMainLooper())
   private var roundTripResumeRunning = false
+  private var roundTripRelayFetchInFlight = false
+  private var roundTripRelayLastAttemptAtMs = 0L
+  private var roundTripRelayLastFailure = ""
+  private var codeGestureInFlight = false
   private val roundTripResumeRunnable = object : Runnable {
     override fun run() {
       runRoundTripResumeTick()
@@ -68,6 +74,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
   private data class RoundTripState(
     val phase: String = ROUND_TRIP_PHASE_IDLE,
     val jobId: String = "",
+    val requestId: String = "",
     val sequence: String = "",
     val direction: String = "",
     val collected: List<String> = emptyList(),
@@ -78,7 +85,11 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val autoExchange: Boolean = false,
     val gptMode: String = "FULL",
     val autoSend: Boolean = false,
-    val createdAtMs: Long = 0L
+    val createdAtMs: Long = 0L,
+    val relaySentAtMs: Long = 0L,
+    val telegramCollectorReadyAtMs: Long = 0L,
+    val telegramFallbackAllowed: Boolean = false,
+    val relayRetryableFailureCount: Int = 0
   )
 
   private data class RoundTripBoundarySnapshot(
@@ -91,6 +102,79 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     val merged: Boolean,
     val changed: Boolean
   )
+
+  private fun isValidRoundTripRequestId(value: String): Boolean {
+    return Regex(
+      "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    ).matches(value)
+  }
+
+  private fun isValidRoundTripJobId(value: String): Boolean {
+    return Regex("^J\\d{4,}-\\d{6}-\\d{2}$").matches(value)
+  }
+
+  private fun shouldSuppressRoundTripTelegramCollector(
+    state: RoundTripState
+  ): Boolean {
+    if (
+      !ROUND_TRIP_REQUEST_ID_ENABLED ||
+      !state.autoExchange ||
+      !state.autoSend ||
+      !isValidRoundTripRequestId(state.requestId) ||
+      state.relaySentAtMs <= 0L ||
+      state.telegramFallbackAllowed
+    ) {
+      return false
+    }
+
+    val eligiblePhase =
+      state.phase == ROUND_TRIP_PHASE_AWAITING_JOB ||
+        state.phase == ROUND_TRIP_PHASE_COLLECTING_FORWARD ||
+        state.phase == ROUND_TRIP_PHASE_COLLECTING_REVERSE
+
+    if (!eligiblePhase) return false
+
+    val elapsed =
+      System.currentTimeMillis() - state.relaySentAtMs
+
+    return elapsed >= 0L &&
+      elapsed < 12L * 60L * 60L * 1000L
+  }
+
+  private fun insertRequestIdIntoRunText(
+    original: String,
+    requestId: String
+  ): String? {
+    if (!isValidRoundTripRequestId(requestId)) return null
+
+    val runMatch = Regex(
+      "\\A(?:[ \\t]*\\r?\\n)*[ \\t]*/run[ \\t]*(\\r?\\n)"
+    ).find(original) ?: return null
+
+    val existingMatches = Regex(
+      "^[ \\t]*REQUEST_ID:[ \\t]*([^\\r\\n]*)",
+      RegexOption.MULTILINE
+    ).findAll(original).toList()
+
+    if (existingMatches.isNotEmpty()) {
+      return if (
+        existingMatches.size == 1 &&
+        existingMatches[0].groupValues[1].trim() == requestId
+      ) {
+        original
+      } else {
+        null
+      }
+    }
+
+    val insertAt = runMatch.range.last + 1
+    val lineEnding = runMatch.groupValues[1]
+
+    return original.substring(0, insertAt) +
+      "REQUEST_ID: $requestId" +
+      lineEnding +
+      original.substring(insertAt)
+  }
 
   private fun loadRoundTripState(): RoundTripState {
     val prefs = getSharedPreferences(ROUND_TRIP_PREFS, MODE_PRIVATE)
@@ -109,6 +193,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       phase = prefs.getString(ROUND_TRIP_KEY_PHASE, ROUND_TRIP_PHASE_IDLE)
         ?: ROUND_TRIP_PHASE_IDLE,
       jobId = prefs.getString(ROUND_TRIP_KEY_JOB_ID, "").orEmpty(),
+      requestId = prefs.getString(ROUND_TRIP_KEY_REQUEST_ID, "") ?: "",
       sequence = prefs.getString(ROUND_TRIP_KEY_SEQUENCE, "").orEmpty(),
       direction = prefs.getString(ROUND_TRIP_KEY_DIRECTION, "").orEmpty(),
       collected = collected,
@@ -122,7 +207,23 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       autoExchange = prefs.getBoolean(ROUND_TRIP_KEY_AUTO_EXCHANGE, false),
       gptMode = prefs.getString(ROUND_TRIP_KEY_MODE, "FULL") ?: "FULL",
       autoSend = prefs.getBoolean(ROUND_TRIP_KEY_AUTO_SEND, false),
-      createdAtMs = prefs.getLong(ROUND_TRIP_KEY_CREATED_AT, 0L)
+      createdAtMs = prefs.getLong(ROUND_TRIP_KEY_CREATED_AT, 0L),
+      relaySentAtMs = prefs.getLong(
+        ROUND_TRIP_KEY_RELAY_SENT_AT,
+        0L
+      ),
+      telegramCollectorReadyAtMs = prefs.getLong(
+        ROUND_TRIP_KEY_TG_COLLECTOR_READY_AT,
+        0L
+      ),
+      telegramFallbackAllowed = prefs.getBoolean(
+        ROUND_TRIP_KEY_TG_FALLBACK_ALLOWED,
+        false
+      ),
+      relayRetryableFailureCount = prefs.getInt(
+        ROUND_TRIP_KEY_RELAY_RETRYABLE_FAILURE_COUNT,
+        0
+      )
     )
   }
 
@@ -136,6 +237,7 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     getSharedPreferences(ROUND_TRIP_PREFS, MODE_PRIVATE).edit()
       .putString(ROUND_TRIP_KEY_PHASE, state.phase)
       .putString(ROUND_TRIP_KEY_JOB_ID, state.jobId)
+      .putString(ROUND_TRIP_KEY_REQUEST_ID, state.requestId)
       .putString(ROUND_TRIP_KEY_SEQUENCE, state.sequence)
       .putString(ROUND_TRIP_KEY_DIRECTION, state.direction)
       .putString(ROUND_TRIP_KEY_COLLECTED, collectedJson)
@@ -150,6 +252,19 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
       .putString(ROUND_TRIP_KEY_MODE, state.gptMode)
       .putBoolean(ROUND_TRIP_KEY_AUTO_SEND, state.autoSend)
       .putLong(ROUND_TRIP_KEY_CREATED_AT, state.createdAtMs)
+      .putLong(ROUND_TRIP_KEY_RELAY_SENT_AT, state.relaySentAtMs)
+      .putLong(
+        ROUND_TRIP_KEY_TG_COLLECTOR_READY_AT,
+        state.telegramCollectorReadyAtMs
+      )
+      .putBoolean(
+        ROUND_TRIP_KEY_TG_FALLBACK_ALLOWED,
+        state.telegramFallbackAllowed
+      )
+      .putInt(
+        ROUND_TRIP_KEY_RELAY_RETRYABLE_FAILURE_COUNT,
+        state.relayRetryableFailureCount
+      )
       .apply()
     if (refreshWidget) {
       try {
@@ -169,6 +284,10 @@ class CopyBridgeAccessibilityService : AccessibilityService() {
     appendDebugLog("ROUND_TRIP", "CLEAR reason=$reason")
     saveRoundTripState(RoundTripState())
     lastRoundTripFrameSignature = ""
+    roundTripRelayLastAttemptAtMs = 0L
+    roundTripRelayLastFailure = ""
+    roundTripJobBaseline = null
+    roundTripJobBaselineCreatedAtMs = 0L
     stopRoundTripResumeLoop()
     if (showToast) Toast.makeText(this, "자동 주고받기를 취소했습니다.", Toast.LENGTH_SHORT).show()
   }
@@ -1025,6 +1144,9 @@ override fun onServiceConnected() {
     roundTripFrameHandler.removeCallbacks(roundTripFrameRunnable)
     roundTripResumeRunning = false
     roundTripResumeHandler.removeCallbacks(roundTripResumeRunnable)
+    roundTripRelayLastAttemptAtMs = 0L
+    roundTripRelayLastFailure = ""
+    codeGestureInFlight = false
 
     if (activeService === this) {
       activeService = null
@@ -1184,6 +1306,50 @@ override fun onServiceConnected() {
     scheduleAutoSendAfterPaste(mode, editableNode)
   }
 
+  private fun prepareRoundTripRequestIdBeforeSend(
+    tgEdit: AccessibilityNodeInfo
+  ): Boolean {
+    if (!ROUND_TRIP_REQUEST_ID_ENABLED) {
+      return true
+    }
+
+    val state = loadRoundTripState()
+
+    if (
+      state.phase != ROUND_TRIP_PHASE_GPT_TO_TG_SENDING ||
+      !state.autoExchange ||
+      !state.autoSend
+    ) {
+      return true
+    }
+
+    val original = tgEdit.text?.toString() ?: return false
+
+    val isRunInstruction = Regex(
+      "\\A(?:[ \\t]*\\r?\\n)*[ \\t]*/run[ \\t]*(?:\\r?\\n)"
+    ).containsMatchIn(original)
+
+    if (!isRunInstruction) {
+      return true
+    }
+
+    val prepared = insertRequestIdIntoRunText(
+      original,
+      state.requestId
+    ) ?: return false
+
+    if (prepared == original) {
+      return true
+    }
+
+    if (!setTextToNode(tgEdit, prepared)) {
+      return false
+    }
+
+    return tgEdit.refresh() &&
+      tgEdit.text?.toString() == prepared
+  }
+
   private fun scheduleAutoSendAfterPaste(
     mode: String,
     editableNode: AccessibilityNodeInfo
@@ -1191,6 +1357,15 @@ override fun onServiceConnected() {
     Handler(Looper.getMainLooper()).postDelayed({
       val firstRoots = getTelegramRoots()
       val firstEdit = findEditableNodeFromRoots(firstRoots) ?: editableNode
+
+      if (!prepareRoundTripRequestIdBeforeSend(firstEdit)) {
+        Log.w(
+          TAG,
+          "ROUND_TRIP_REQUEST_ID_PREPARE_FAILED"
+        )
+        return@postDelayed
+      }
+
       val firstSent = clickTelegramSendButtonSafely(firstRoots, firstEdit)
 
       if (firstSent) {
@@ -1227,16 +1402,32 @@ override fun onServiceConnected() {
     val state = loadRoundTripState()
     if (state.phase != ROUND_TRIP_PHASE_GPT_TO_TG_SENDING) return
     if (state.autoExchange && state.autoSend) {
+      roundTripRelayLastAttemptAtMs = 0L
+      roundTripRelayLastFailure = ""
+
+      val baselineRoots = getTelegramRoots()
+
+      roundTripJobBaseline = if (baselineRoots.isNotEmpty()) {
+        collectRoundTripJobIds(baselineRoots)
+      } else {
+        null
+      }
+
+      roundTripJobBaselineCreatedAtMs = state.createdAtMs
+
       saveRoundTripState(
         state.copy(
           phase = ROUND_TRIP_PHASE_AWAITING_JOB,
           jobId = "",
+          relaySentAtMs = System.currentTimeMillis(),
           sequence = "",
           direction = "",
           collected = emptyList(),
           gapSuspected = false,
           beginSeen = false,
-          readySeen = false
+          readySeen = false,
+          telegramFallbackAllowed = false,
+          relayRetryableFailureCount = 0
         )
       )
       lastRoundTripFrameSignature = ""
@@ -1787,7 +1978,8 @@ override fun onServiceConnected() {
     context: Context,
     mode: String,
     autoSend: Boolean,
-    autoExchange: Boolean
+    autoExchange: Boolean,
+    requestId: String = ""
   ) {
     val replacing = pendingGptToTelegram != null
     val requestedAt = System.currentTimeMillis()
@@ -1800,10 +1992,13 @@ override fun onServiceConnected() {
     saveRoundTripState(
       RoundTripState(
         phase = ROUND_TRIP_PHASE_GPT_RESERVED,
+        requestId = requestId,
         autoExchange = autoExchange,
         gptMode = mode,
         autoSend = autoSend,
-        createdAtMs = requestedAt
+        createdAtMs = requestedAt,
+        telegramFallbackAllowed = false,
+        relayRetryableFailureCount = 0
       )
     )
     startRoundTripResumeLoop()
@@ -1906,22 +2101,41 @@ override fun onServiceConnected() {
     val tgRoots = getTelegramRoots()
     val definitelyBusy = isGptDefinitelyBusyForReservation(roots)
     val bothRootsReady = roots.isNotEmpty() && tgRoots.isNotEmpty()
+    val relayRequestId =
+      if (
+        ROUND_TRIP_REQUEST_ID_ENABLED &&
+        autoExchange &&
+        autoSend
+      ) {
+        java.util.UUID.randomUUID().toString()
+      } else {
+        ""
+      }
     appendDebugLog(
       "GPT→TG",
       "GPT_TO_TG_RESERVATION_DECISION definitelyBusy=$definitelyBusy aiRoots=${roots.size} tgRoots=${tgRoots.size}"
     )
     return if (definitelyBusy || !bothRootsReady) {
-      queueGptToTelegramAfterCompletion(context, gptOutputMode, autoSend, autoExchange)
+      queueGptToTelegramAfterCompletion(
+        context,
+        gptOutputMode,
+        autoSend,
+        autoExchange,
+        relayRequestId
+      )
       true
     } else {
       val createdAt = System.currentTimeMillis()
       saveRoundTripState(
         RoundTripState(
           phase = ROUND_TRIP_PHASE_GPT_TO_TG_SENDING,
+          requestId = relayRequestId,
           autoExchange = autoExchange,
           gptMode = gptOutputMode,
           autoSend = autoSend,
-          createdAtMs = createdAt
+          createdAtMs = createdAt,
+          telegramFallbackAllowed = false,
+          relayRetryableFailureCount = 0
         )
       )
       scheduleRoundTripSendingWatchdog(createdAt)
@@ -1992,15 +2206,462 @@ override fun onServiceConnected() {
   private fun isTelegramForegroundForRoundTrip(): Boolean =
     getExplicitActiveForegroundPackageForRoundTrip()?.let(::isTelegramPackage) == true
 
+  private fun applyVerifiedRelayReport(
+    expectedJobId: String,
+    expectedCreatedAtMs: Long,
+    expectedSentAtMs: Long,
+    result: CopyBridgeRelayReportClient.FetchResult.Ready
+  ) {
+    val state = loadRoundTripState()
+
+    val eligiblePhase =
+      state.phase == ROUND_TRIP_PHASE_AWAITING_JOB ||
+        state.phase == ROUND_TRIP_PHASE_COLLECTING_FORWARD ||
+        state.phase == ROUND_TRIP_PHASE_COLLECTING_REVERSE
+
+    if (
+      !eligiblePhase ||
+      !state.autoExchange ||
+      !state.autoSend ||
+      state.jobId != expectedJobId ||
+      state.createdAtMs != expectedCreatedAtMs ||
+      state.relaySentAtMs != expectedSentAtMs
+    ) {
+      return
+    }
+
+    if (result.jobId != expectedJobId) {
+      return
+    }
+
+    if (
+      state.sequence.isNotBlank() &&
+      state.sequence != result.sequence
+    ) {
+      appendDebugLog(
+        "ROUND_TRIP",
+        "RELAY_SEQUENCE_CONFLICT"
+      )
+      return
+    }
+
+    val reportCreatedAtMs =
+      result.createdAtSeconds * 1000L
+
+    if (
+      reportCreatedAtMs <
+      expectedSentAtMs - ROUND_TRIP_RELAY_CLOCK_SKEW_MS
+    ) {
+      appendDebugLog(
+        "ROUND_TRIP",
+        "RELAY_REPORT_TOO_OLD"
+      )
+      return
+    }
+
+    val nowMs = System.currentTimeMillis()
+
+    if (
+      expectedSentAtMs <= 0L ||
+      nowMs < expectedSentAtMs ||
+      nowMs - expectedSentAtMs >
+      GPT_TO_TG_RESERVATION_MAX_AGE_MS
+    ) {
+      return
+    }
+
+    if (
+      result.body.isBlank() ||
+      result.body.length > ROUND_TRIP_MAX_COLLECTED_CHARS
+    ) {
+      return
+    }
+
+    val updated = state.copy(
+      phase = ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT,
+      jobId = result.jobId,
+      sequence = result.sequence,
+      direction = "RELAY",
+      collected = listOf(result.body),
+      gapSuspected = false,
+      collectionInterrupted = false
+    )
+
+    roundTripFrameHandler.removeCallbacks(
+      roundTripFrameRunnable
+    )
+
+    saveRoundTripState(updated)
+
+    appendDebugLog(
+      "ROUND_TRIP",
+      "RELAY_REPORT_VERIFIED job=${result.jobId} " +
+        "sequence=${result.sequence} chars=${result.body.length}"
+    )
+
+    maybeDeliverCollectedRoundTripToGpt()
+  }
+
+  private fun maybeStartRoundTripRelayFetch(
+    state: RoundTripState
+  ) {
+    val eligiblePhase =
+      state.phase == ROUND_TRIP_PHASE_AWAITING_JOB ||
+        state.phase == ROUND_TRIP_PHASE_COLLECTING_FORWARD ||
+        state.phase == ROUND_TRIP_PHASE_COLLECTING_REVERSE
+
+    val useRequestId =
+      ROUND_TRIP_REQUEST_ID_ENABLED &&
+        isValidRoundTripRequestId(state.requestId)
+
+    if (
+      !eligiblePhase ||
+      !state.autoExchange ||
+      !state.autoSend ||
+      (state.jobId.isBlank() && !useRequestId) ||
+      state.relaySentAtMs <= 0L ||
+      roundTripRelayFetchInFlight
+    ) {
+      return
+    }
+
+    val nowMs = System.currentTimeMillis()
+    val ageMs = nowMs - state.relaySentAtMs
+
+    if (
+      ageMs < 0L ||
+      ageMs > GPT_TO_TG_RESERVATION_MAX_AGE_MS
+    ) {
+      return
+    }
+
+    if (
+      roundTripRelayLastAttemptAtMs > 0L &&
+      nowMs - roundTripRelayLastAttemptAtMs in
+      0L until ROUND_TRIP_RELAY_POLL_INTERVAL_MS
+    ) {
+      return
+    }
+
+    val expectedJobId = state.jobId
+    val expectedRequestId =
+      if (useRequestId) state.requestId else ""
+    val expectedCreatedAtMs = state.createdAtMs
+    val expectedSentAtMs = state.relaySentAtMs
+    val expectedPhase = state.phase
+
+    roundTripRelayFetchInFlight = true
+    roundTripRelayLastAttemptAtMs = nowMs
+
+    Thread({
+      var resultFromRequestId = false
+      var tokenUnavailable = false
+      val result = try {
+        val token = CopyBridgeRelayTokenStore.readToken(
+          applicationContext
+        )
+
+        if (token.isNullOrBlank()) {
+          tokenUnavailable = true
+          null
+        } else if (useRequestId) {
+          val requestResult =
+            CopyBridgeRelayReportClient.fetchLatestByRequestId(
+              expectedRequestId,
+              token
+            )
+
+          if (
+            requestResult is
+              CopyBridgeRelayReportClient.FetchResult.Ready ||
+            expectedJobId.isBlank()
+          ) {
+            resultFromRequestId = true
+            requestResult
+          } else {
+            val jobResult = try {
+              CopyBridgeRelayReportClient.fetchLatest(
+                expectedJobId,
+                token
+              )
+            } catch (_: Exception) {
+              CopyBridgeRelayReportClient
+                .FetchResult.RetryableFailure
+            }
+
+            if (
+              jobResult is
+                CopyBridgeRelayReportClient.FetchResult.Ready
+            ) {
+              jobResult
+            } else {
+              resultFromRequestId = true
+              requestResult
+            }
+          }
+        } else {
+          CopyBridgeRelayReportClient.fetchLatest(
+            expectedJobId,
+            token
+          )
+        }
+      } catch (_: Exception) {
+        resultFromRequestId = useRequestId
+        CopyBridgeRelayReportClient
+          .FetchResult.RetryableFailure
+      }
+
+      roundTripResumeHandler.post {
+        roundTripRelayFetchInFlight = false
+
+        if (activeService !== this) {
+          return@post
+        }
+
+        val current = loadRoundTripState()
+
+        val requestStartedInEligiblePhase =
+          expectedPhase == ROUND_TRIP_PHASE_AWAITING_JOB ||
+            expectedPhase == ROUND_TRIP_PHASE_COLLECTING_FORWARD ||
+            expectedPhase == ROUND_TRIP_PHASE_COLLECTING_REVERSE
+
+        val currentEligiblePhase =
+          current.phase == ROUND_TRIP_PHASE_AWAITING_JOB ||
+            current.phase == ROUND_TRIP_PHASE_COLLECTING_FORWARD ||
+            current.phase == ROUND_TRIP_PHASE_COLLECTING_REVERSE
+
+        val sessionIdentityMatches = if (useRequestId) {
+          current.requestId == expectedRequestId &&
+            (
+              resultFromRequestId ||
+                current.jobId == expectedJobId
+              )
+        } else {
+          current.jobId == expectedJobId
+        }
+
+        val stillCurrent =
+          requestStartedInEligiblePhase &&
+            currentEligiblePhase &&
+            current.autoExchange &&
+            current.autoSend &&
+            sessionIdentityMatches &&
+            current.createdAtMs == expectedCreatedAtMs &&
+            current.relaySentAtMs == expectedSentAtMs
+
+        if (!stillCurrent) {
+          return@post
+        }
+
+        when (result) {
+          is CopyBridgeRelayReportClient.FetchResult.Ready -> {
+            roundTripRelayLastFailure = ""
+
+            if (resultFromRequestId) {
+              if (
+                current.requestId != expectedRequestId ||
+                (
+                  current.jobId.isNotBlank() &&
+                    current.jobId != result.jobId
+                  ) ||
+                !isValidRoundTripJobId(result.jobId)
+              ) {
+                return@post
+              }
+
+              if (
+                current.jobId.isBlank() ||
+                current.relayRetryableFailureCount != 0
+              ) {
+                saveRoundTripState(
+                  current.copy(
+                    jobId = result.jobId,
+                    relayRetryableFailureCount = 0
+                  ),
+                  refreshWidget = false
+                )
+              }
+
+              applyVerifiedRelayReport(
+                result.jobId,
+                expectedCreatedAtMs,
+                expectedSentAtMs,
+                result
+              )
+            } else {
+              if (current.relayRetryableFailureCount != 0) {
+                saveRoundTripState(
+                  current.copy(
+                    relayRetryableFailureCount = 0
+                  ),
+                  refreshWidget = false
+                )
+              }
+
+              applyVerifiedRelayReport(
+                expectedJobId,
+                expectedCreatedAtMs,
+                expectedSentAtMs,
+                result
+              )
+            }
+          }
+
+          CopyBridgeRelayReportClient.FetchResult.Pending -> {
+            roundTripRelayLastFailure = ""
+            if (
+              useRequestId &&
+              resultFromRequestId &&
+              current.relayRetryableFailureCount != 0
+            ) {
+              saveRoundTripState(
+                current.copy(
+                  relayRetryableFailureCount = 0
+                ),
+                refreshWidget = false
+              )
+            }
+          }
+
+          CopyBridgeRelayReportClient.FetchResult.Unauthorized -> {
+            if (roundTripRelayLastFailure != "unauthorized") {
+              appendDebugLog(
+                "ROUND_TRIP",
+                "RELAY_AUTH_UNAVAILABLE"
+              )
+            }
+            roundTripRelayLastFailure = "unauthorized"
+            if (
+              useRequestId &&
+              resultFromRequestId &&
+              (
+                !current.telegramFallbackAllowed ||
+                  current.relayRetryableFailureCount != 0
+                )
+            ) {
+              saveRoundTripState(
+                current.copy(
+                  telegramFallbackAllowed = true,
+                  relayRetryableFailureCount = 0
+                )
+              )
+              if (!current.telegramFallbackAllowed) {
+                appendDebugLog(
+                  "ROUND_TRIP",
+                  "ROUND_TRIP_TELEGRAM_FALLBACK_ENABLED"
+                )
+              }
+            }
+          }
+
+          CopyBridgeRelayReportClient.FetchResult.Invalid -> {
+            if (roundTripRelayLastFailure != "invalid") {
+              appendDebugLog(
+                "ROUND_TRIP",
+                "RELAY_RESPONSE_INVALID"
+              )
+            }
+            roundTripRelayLastFailure = "invalid"
+            if (
+              useRequestId &&
+              resultFromRequestId &&
+              (
+                !current.telegramFallbackAllowed ||
+                  current.relayRetryableFailureCount != 0
+                )
+            ) {
+              saveRoundTripState(
+                current.copy(
+                  telegramFallbackAllowed = true,
+                  relayRetryableFailureCount = 0
+                )
+              )
+              if (!current.telegramFallbackAllowed) {
+                appendDebugLog(
+                  "ROUND_TRIP",
+                  "ROUND_TRIP_TELEGRAM_FALLBACK_ENABLED"
+                )
+              }
+            }
+          }
+
+          CopyBridgeRelayReportClient.FetchResult.RetryableFailure -> {
+            if (roundTripRelayLastFailure != "network") {
+              appendDebugLog(
+                "ROUND_TRIP",
+                "RELAY_NETWORK_RETRY"
+              )
+            }
+            roundTripRelayLastFailure = "network"
+            if (useRequestId && resultFromRequestId) {
+              val count =
+                (current.relayRetryableFailureCount + 1)
+                  .coerceAtMost(6)
+              val allowFallback =
+                current.telegramFallbackAllowed || count >= 6
+
+              saveRoundTripState(
+                current.copy(
+                  telegramFallbackAllowed = allowFallback,
+                  relayRetryableFailureCount = count
+                ),
+                refreshWidget = allowFallback &&
+                  !current.telegramFallbackAllowed
+              )
+
+              if (
+                allowFallback &&
+                !current.telegramFallbackAllowed
+              ) {
+                appendDebugLog(
+                  "ROUND_TRIP",
+                  "ROUND_TRIP_TELEGRAM_FALLBACK_ENABLED"
+                )
+              }
+            }
+          }
+
+          null -> {
+            roundTripRelayLastFailure = ""
+            if (
+              useRequestId &&
+              tokenUnavailable &&
+              (
+                !current.telegramFallbackAllowed ||
+                  current.relayRetryableFailureCount != 0
+                )
+            ) {
+              saveRoundTripState(
+                current.copy(
+                  telegramFallbackAllowed = true,
+                  relayRetryableFailureCount = 0
+                )
+              )
+              if (!current.telegramFallbackAllowed) {
+                appendDebugLog(
+                  "ROUND_TRIP",
+                  "ROUND_TRIP_TELEGRAM_FALLBACK_ENABLED"
+                )
+              }
+            }
+          }
+        }
+      }
+    }, "CopyBridgeRelayFetch").start()
+  }
+
   private fun runRoundTripResumeTick() {
     val state = loadRoundTripState()
     if (state.phase == ROUND_TRIP_PHASE_IDLE || !state.autoExchange) {
       stopRoundTripResumeLoop()
       return
     }
+    val suppressTelegramCollector =
+      shouldSuppressRoundTripTelegramCollector(state)
     when (state.phase) {
       ROUND_TRIP_PHASE_AWAITING_JOB -> {
         if (
+          !suppressTelegramCollector &&
           getTelegramRoots().isNotEmpty() &&
           isTelegramForegroundForRoundTrip()
         ) {
@@ -2018,6 +2679,7 @@ override fun onServiceConnected() {
             )
           }
         } else if (
+          !suppressTelegramCollector &&
           activePackage != null &&
           isTelegramPackage(activePackage) &&
           getTelegramRoots().isNotEmpty()
@@ -2027,9 +2689,22 @@ override fun onServiceConnected() {
       }
       ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT -> maybeDeliverCollectedRoundTripToGpt()
     }
+    maybeStartRoundTripRelayFetch(loadRoundTripState())
+    maybeFinishTelegramCollectorFallback()
   }
 
   private fun scheduleRoundTripTelegramFrameRead() {
+    if (
+      shouldSuppressRoundTripTelegramCollector(
+        loadRoundTripState()
+      )
+    ) {
+      roundTripFrameHandler.removeCallbacks(
+        roundTripFrameRunnable
+      )
+      return
+    }
+
     val phase = loadRoundTripState().phase
     if (
       phase != ROUND_TRIP_PHASE_AWAITING_JOB &&
@@ -2076,6 +2751,44 @@ override fun onServiceConnected() {
     for (index in 0 until node.childCount) {
       collectRoundTripBoundaryLines(node.getChild(index), begin, ready)
     }
+  }
+
+  private fun collectRoundTripJobIds(
+    roots: List<AccessibilityNodeInfo>
+  ): Set<String> {
+    val result = linkedSetOf<String>()
+
+    fun visit(node: AccessibilityNodeInfo?) {
+      if (node == null) return
+
+      val values = listOfNotNull(
+        node.text?.toString(),
+        node.contentDescription?.toString()
+      )
+
+      for (value in values) {
+        val normalized = value
+          .replace("\r\n", "\n")
+          .replace("\r", "\n")
+
+        for (rawLine in normalized.lines()) {
+          val match = roundTripJobRegex.matchEntire(
+            rawLine.trim()
+          )
+
+          if (match != null) {
+            result.add(match.groupValues[1])
+          }
+        }
+      }
+
+      for (index in 0 until node.childCount) {
+        visit(node.getChild(index))
+      }
+    }
+
+    roots.forEach(::visit)
+    return result
   }
 
   private fun collectRoundTripBoundaries(
@@ -2187,6 +2900,97 @@ override fun onServiceConnected() {
     Toast.makeText(this, message, Toast.LENGTH_LONG).show()
   }
 
+  private fun maybeFinishTelegramCollectorFallback() {
+    val state = loadRoundTripState()
+
+    if (shouldSuppressRoundTripTelegramCollector(state)) {
+      return
+    }
+
+    val eligiblePhase =
+      state.phase == ROUND_TRIP_PHASE_AWAITING_JOB ||
+        state.phase == ROUND_TRIP_PHASE_COLLECTING_FORWARD ||
+        state.phase == ROUND_TRIP_PHASE_COLLECTING_REVERSE
+
+    if (
+      !eligiblePhase ||
+      !state.autoExchange ||
+      !state.beginSeen ||
+      !state.readySeen ||
+      state.gapSuspected ||
+      state.collected.size != 1 ||
+      state.collected.single().isBlank()
+    ) {
+      return
+    }
+
+    val nowMs = System.currentTimeMillis()
+
+    val tokenConfigured = try {
+      CopyBridgeRelayTokenStore.hasToken(
+        applicationContext
+      )
+    } catch (_: Exception) {
+      false
+    }
+
+    val relayLookupPossible =
+      state.jobId.isNotBlank() ||
+        (
+          ROUND_TRIP_REQUEST_ID_ENABLED &&
+            isValidRoundTripRequestId(state.requestId)
+          )
+
+    val relayEligible =
+      state.autoSend &&
+        relayLookupPossible &&
+        state.relaySentAtMs > 0L &&
+        nowMs >= state.relaySentAtMs &&
+        nowMs - state.relaySentAtMs <=
+          GPT_TO_TG_RESERVATION_MAX_AGE_MS &&
+        tokenConfigured
+
+    val relayHardFailure =
+      roundTripRelayLastFailure == "unauthorized" ||
+        roundTripRelayLastFailure == "invalid"
+
+    val collectorReadyAgeMs =
+      nowMs - state.telegramCollectorReadyAtMs
+
+    val waitForRelay =
+      relayEligible &&
+        !relayHardFailure &&
+        state.telegramCollectorReadyAtMs > 0L &&
+        collectorReadyAgeMs >= 0L &&
+        collectorReadyAgeMs <
+          ROUND_TRIP_RELAY_COLLECTOR_GRACE_MS
+
+    if (waitForRelay) {
+      return
+    }
+
+    val reason = when {
+      !relayEligible -> "relayUnavailable"
+      relayHardFailure -> "relayRejected"
+      else -> "relayGraceExpired"
+    }
+
+    appendDebugLog(
+      "ROUND_TRIP",
+      "TELEGRAM_FALLBACK_SELECTED reason=$reason " +
+        "job=${state.jobId} sequence=${state.sequence}"
+    )
+
+    saveRoundTripState(
+      state.copy(
+        phase = ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT,
+        direction = "TELEGRAM_FALLBACK"
+      )
+    )
+
+    maybeDeliverCollectedRoundTripToGpt()
+  }
+
   private fun saveRoundTripText(
     state: RoundTripState,
     incoming: String,
@@ -2233,11 +3037,26 @@ override fun onServiceConnected() {
     }
     if (updated.beginSeen && updated.readySeen && !gap) {
       val collectedText = fragments.singleOrNull().orEmpty()
+
       if (collectedText.isBlank()) {
-        markRoundTripAmbiguous(updated, "수집된 완료보고가 없습니다.", "emptyResult")
+        markRoundTripAmbiguous(
+          updated,
+          "수집된 완료보고가 없습니다.",
+          "emptyResult"
+        )
       } else {
-        saveRoundTripState(updated.copy(phase = ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT))
-        maybeDeliverCollectedRoundTripToGpt()
+        val readyAtMs =
+          updated.telegramCollectorReadyAtMs.takeIf {
+            it > 0L
+          } ?: System.currentTimeMillis()
+
+        saveRoundTripState(
+          updated.copy(
+            telegramCollectorReadyAtMs = readyAtMs
+          )
+        )
+
+        maybeFinishTelegramCollectorFallback()
       }
     } else {
       saveRoundTripState(updated)
@@ -2246,6 +3065,9 @@ override fun onServiceConnected() {
 
   private fun processRoundTripTelegramFrame() {
     var state = loadRoundTripState()
+    if (shouldSuppressRoundTripTelegramCollector(state)) {
+      return
+    }
     if (!state.autoExchange) return
     if (
       state.phase != ROUND_TRIP_PHASE_AWAITING_JOB &&
@@ -2272,18 +3094,77 @@ override fun onServiceConnected() {
       )
     }
     val boundaries = collectRoundTripBoundaries(roots)
+    val visibleJobIds = collectRoundTripJobIds(roots)
     val frameText = buildRoundTripFrameText(roots)
     val signature = listOf(
       frameText,
       boundaries.beginMarkers.sortedBy { it.first + it.second }.joinToString(","),
-      boundaries.readyMarkers.sortedBy { it.first + it.second }.joinToString(",")
+      boundaries.readyMarkers.sortedBy { it.first + it.second }.joinToString(","),
+      visibleJobIds.sorted().joinToString(",")
     ).joinToString("\u001F")
     if (signature.isBlank() || signature == lastRoundTripFrameSignature) return
     lastRoundTripFrameSignature = signature
     val boundaryIdentities =
       (boundaries.beginMarkers + boundaries.readyMarkers).toSet()
 
+    if (
+      state.phase == ROUND_TRIP_PHASE_AWAITING_JOB &&
+      state.jobId.isBlank() &&
+      state.createdAtMs > 0L &&
+      roundTripJobBaselineCreatedAtMs == state.createdAtMs &&
+      isTelegramForegroundForRoundTrip()
+    ) {
+      val baseline = roundTripJobBaseline
+
+      if (baseline != null) {
+        val candidates = visibleJobIds
+          .filterNot { it in baseline }
+
+        if (candidates.size == 1) {
+          val candidate = candidates.single()
+
+          if (
+            boundaryIdentities.all {
+              it.first == candidate
+            }
+          ) {
+            state = state.copy(jobId = candidate)
+
+            saveRoundTripState(
+              state,
+              refreshWidget = false
+            )
+
+            appendDebugLog(
+              "ROUND_TRIP",
+              "JOB_ACK_TRACKED"
+            )
+          }
+        } else if (candidates.size > 1) {
+          appendDebugLog(
+            "ROUND_TRIP",
+            "JOB_ACK_AMBIGUOUS count=${candidates.size}"
+          )
+        }
+      }
+    }
+
     if (state.phase == ROUND_TRIP_PHASE_AWAITING_JOB) {
+      val boundJobId = state.jobId.takeIf {
+        it.isNotBlank()
+      }
+
+      val targetBegins = boundaries.beginMarkers.filter {
+        boundJobId == null || it.first == boundJobId
+      }
+
+      val targetReadies = boundaries.readyMarkers.filter {
+        boundJobId == null || it.first == boundJobId
+      }
+
+      val targetBoundaryIdentities =
+        (targetBegins + targetReadies).toSet()
+
       val retainedIdentity = if (
         state.jobId.isNotBlank() && state.sequence.isNotBlank()
       ) {
@@ -2292,7 +3173,7 @@ override fun onServiceConnected() {
         null
       }
       val retainedIdentityConflict = retainedIdentity?.let { expected ->
-        boundaryIdentities.firstOrNull { it != expected }
+        targetBoundaryIdentities.firstOrNull { it != expected }
       }
       if (retainedIdentityConflict != null) {
         markRoundTripAmbiguous(
@@ -2302,12 +3183,12 @@ override fun onServiceConnected() {
         )
         return
       }
-      if (boundaryIdentities.size > 1) {
+      if (targetBoundaryIdentities.size > 1) {
         markRoundTripAmbiguous(state, "다른 완료보고 경계가 감지되어 자동 수집을 중단했습니다.", "multipleReportIdentities")
         return
       }
-      val samePair = boundaries.beginMarkers.firstOrNull { marker ->
-        boundaries.readyMarkers.contains(marker) &&
+      val samePair = targetBegins.firstOrNull { marker ->
+        targetReadies.contains(marker) &&
           (retainedIdentity == null || marker == retainedIdentity)
       }
       if (samePair != null) {
@@ -2323,10 +3204,10 @@ override fun onServiceConnected() {
         )
         return
       }
-      val begin = boundaries.beginMarkers.firstOrNull { marker ->
+      val begin = targetBegins.firstOrNull { marker ->
         retainedIdentity == null || marker == retainedIdentity
       }
-      val ready = boundaries.readyMarkers.firstOrNull { marker ->
+      val ready = targetReadies.firstOrNull { marker ->
         retainedIdentity == null || marker == retainedIdentity
       }
       if (begin != null) {
@@ -2386,13 +3267,39 @@ override fun onServiceConnected() {
 
   private fun maybeDeliverCollectedRoundTripToGpt() {
     val state = loadRoundTripState()
-    if (state.phase != ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT || !state.autoExchange) return
+
+    if (
+      state.phase != ROUND_TRIP_PHASE_GPT_DELIVERY_WAIT ||
+      !state.autoExchange
+    ) {
+      return
+    }
+
     val aiRoots = getAiRoots()
-    val tgRoots = getTelegramRoots()
-    if (aiRoots.isEmpty() || tgRoots.isEmpty()) return
-    if (isGptDefinitelyBusyForReservation(aiRoots)) return
-    val edit = findAiEditableWithRetryForTgToGpt(aiRoots).first ?: return
-    if (!edit.text?.toString().orEmpty().isBlank()) return
+
+    if (aiRoots.isEmpty()) return
+
+    // Telegram collector 원문은 기존 조건을 유지한다.
+    // Relay 검증 원문은 Telegram 창이 없어도 전달한다.
+    if (
+      state.direction != "RELAY" &&
+      getTelegramRoots().isEmpty()
+    ) {
+      return
+    }
+
+    if (isGptDefinitelyBusyForReservation(aiRoots)) {
+      return
+    }
+
+    val edit =
+      findAiEditableWithRetryForTgToGpt(aiRoots).first
+        ?: return
+
+    if (!edit.text?.toString().orEmpty().isBlank()) {
+      return
+    }
+
     deliverCollectedRoundTripToGpt()
   }
 
@@ -2407,6 +3314,19 @@ override fun onServiceConnected() {
       saveRoundTripState(state.copy(phase = ROUND_TRIP_PHASE_AMBIGUOUS))
       return
     }
+
+    val deliverySource = if (state.direction == "RELAY") {
+      "CLOUDFLARE_RELAY"
+    } else {
+      "TELEGRAM_FALLBACK"
+    }
+
+    appendDebugLog(
+      "ROUND_TRIP",
+      "GPT_DELIVERY_SOURCE source=$deliverySource " +
+        "job=${state.jobId} sequence=${state.sequence}"
+    )
+
     saveRoundTripState(state.copy(phase = ROUND_TRIP_PHASE_GPT_DELIVERING))
     finishTelegramToGptWithSelectedTexts(
       context = this,
@@ -2414,6 +3334,12 @@ override fun onServiceConnected() {
       autoSend = true,
       selectedTexts = listOf(text),
       onSendResult = { result ->
+        appendDebugLog(
+          "ROUND_TRIP",
+          "GPT_DELIVERY_RESULT source=$deliverySource " +
+            "result=$result"
+        )
+
         if (result == TgToGptSendResult.VERIFIED) {
           clearRoundTripState("roundTripDelivered")
         } else {
@@ -3536,7 +4462,10 @@ override fun onServiceConnected() {
     val sentinel = "__COPYBRIDGE_COPY_SENTINEL_${System.currentTimeMillis()}"
     copyToClipboard(sentinel)
 
-    val clicked = clickExactGptCopyCandidate(target)
+    val clicked = clickGptCopyCandidateWithReveal(
+      target,
+      gptOutputMode
+    )
     appendDebugLog("GPT\u2192TG", "COPY_BUTTON clicked=$clicked")
     if (!clicked) return null
 
@@ -3622,6 +4551,138 @@ override fun onServiceConnected() {
     }
   }
 
+  private fun collectCodeContainerBodyNodes(
+    node: AccessibilityNodeInfo,
+    output: MutableList<String>,
+    budget: IntArray,
+    depth: Int = 0
+  ): Boolean {
+    if (budget[0] >= 240 || depth > 20) {
+      return false
+    }
+
+    budget[0]++
+
+    val className =
+      node.className?.toString().orEmpty()
+
+    val rawText = try {
+      node.text?.toString().orEmpty()
+    } catch (_: Exception) {
+      ""
+    }
+
+    if (
+      className == "android.widget.TextView" &&
+      rawText.length >= 30 &&
+      rawText.isNotBlank()
+    ) {
+      output.add(rawText)
+
+      if (output.size > 1) return false
+    }
+
+    val childCount = try {
+      node.childCount
+    } catch (_: Exception) {
+      return false
+    }
+
+    for (index in 0 until childCount) {
+      val child = try {
+        node.getChild(index)
+      } catch (_: Exception) {
+        return false
+      } ?: return false
+
+      if (
+        !collectCodeContainerBodyNodes(
+          child,
+          output,
+          budget,
+          depth + 1
+        )
+      ) {
+        return false
+      }
+    }
+
+    return true
+  }
+
+  private fun extractGptCodeBodyDirectly(
+    aiRoots: List<AccessibilityNodeInfo>
+  ): String? {
+    val candidates =
+      mutableListOf<CopyButtonCandidate>()
+
+    aiRoots.forEach { root ->
+      collectGptCopyButtonCandidates(
+        root,
+        candidates
+      )
+    }
+
+    val selected =
+      findBestGptCopyButtonForPaste(
+        "CODE",
+        candidates
+      ) ?: return null
+
+    if (!selected.isCodeCopy) return null
+
+    val packageName =
+      selected.node.packageName
+        ?.toString()
+        .orEmpty()
+
+    if (
+      !isChatGptPackageForTgToGpt(
+        packageName
+      )
+    ) {
+      return null
+    }
+
+    var ancestor = try {
+      selected.node.parent
+    } catch (_: Exception) {
+      null
+    }
+
+    for (hop in 1..16) {
+      val container = ancestor ?: return null
+
+      val bodies = mutableListOf<String>()
+      val budget = intArrayOf(0)
+
+      val complete =
+        collectCodeContainerBodyNodes(
+          container,
+          bodies,
+          budget
+        )
+
+      if (!complete) return null
+
+      if (bodies.size == 1) {
+        return bodies.single()
+          .trim()
+          .takeIf { it.isNotBlank() }
+      }
+
+      if (bodies.size > 1) return null
+
+      ancestor = try {
+        container.parent
+      } catch (_: Exception) {
+        null
+      }
+    }
+
+    return null
+  }
+
   private fun clickExactGptCopyCandidate(
     candidate: CopyButtonCandidate
   ): Boolean {
@@ -3632,6 +4693,279 @@ override fun onServiceConnected() {
     return clickNodeOrNearClickableParentSafely(
       node,
       ::isChatGptPackageForTgToGpt
+    )
+  }
+
+  private fun clickGptCopyCandidateWithReveal(
+    candidate: CopyButtonCandidate,
+    gptOutputMode: String
+  ): Boolean {
+    if (gptOutputMode != "CODE") {
+      return clickExactGptCopyCandidate(candidate)
+    }
+
+    if (!candidate.isCodeCopy) return false
+
+    if (clickExactGptCopyCandidate(candidate)) {
+      return true
+    }
+
+    val bounds = android.graphics.Rect()
+
+    val isOffscreen = try {
+      candidate.node.getBoundsInScreen(bounds)
+
+      bounds.top < 0 ||
+        bounds.bottom <= 0 ||
+        !candidate.node.isVisibleToUser
+    } catch (_: Exception) {
+      false
+    }
+
+    if (!isOffscreen) return false
+
+    var revealNode: AccessibilityNodeInfo? =
+      candidate.node
+
+    var revealSucceeded = false
+
+    for (depth in 0..2) {
+      val node = revealNode ?: break
+
+      val packageName =
+        node.packageName?.toString().orEmpty()
+
+      if (!isChatGptPackageForTgToGpt(packageName)) {
+        break
+      }
+
+      val shown = try {
+        node.performAction(
+          AccessibilityNodeInfo.AccessibilityAction
+            .ACTION_SHOW_ON_SCREEN.id
+        )
+      } catch (_: Exception) {
+        false
+      }
+
+      if (shown) {
+        revealSucceeded = true
+        break
+      }
+
+      revealNode = try {
+        node.parent
+      } catch (_: Exception) {
+        null
+      }
+    }
+
+    if (!revealSucceeded) return false
+
+    var lastFailure = "notVisible"
+
+    for (attempt in 1..4) {
+      android.os.SystemClock.sleep(300L)
+
+      val refreshedCandidates =
+        mutableListOf<CopyButtonCandidate>()
+
+      getAiRoots().forEach { root ->
+        collectGptCopyButtonCandidates(
+          root,
+          refreshedCandidates
+        )
+      }
+
+      val refreshed =
+        findBestGptCopyButtonForPaste(
+          "CODE",
+          refreshedCandidates
+        )
+
+      if (refreshed == null || !refreshed.isCodeCopy) {
+        lastFailure = "codeCandidateMissing"
+
+        appendDebugLog(
+          "GPT→TG",
+          "CODE_REVEAL attempt=$attempt result=candidateMissing"
+        )
+
+        continue
+      }
+
+      val refreshedPackage =
+        refreshed.node.packageName
+          ?.toString()
+          .orEmpty()
+
+      if (
+        !isChatGptPackageForTgToGpt(
+          refreshedPackage
+        )
+      ) {
+        appendDebugLog(
+          "GPT→TG",
+          "CODE_REVEAL result=packageMismatch"
+        )
+
+        return false
+      }
+
+      val rect = android.graphics.Rect()
+
+      val visible = try {
+        refreshed.node.getBoundsInScreen(rect)
+
+        refreshed.node.isVisibleToUser &&
+          rect.top >= 0 &&
+          rect.bottom > rect.top
+      } catch (_: Exception) {
+        false
+      }
+
+      appendDebugLog(
+        "GPT→TG",
+        "CODE_REVEAL attempt=$attempt " +
+          "candidate=true visible=$visible " +
+          "top=${rect.top} bottom=${rect.bottom}"
+      )
+
+      if (!visible) {
+        lastFailure = "notVisible"
+        continue
+      }
+
+      val clicked =
+        clickExactGptCopyCandidate(refreshed)
+
+      appendDebugLog(
+        "GPT→TG",
+        "CODE_REVEAL_CLICK attempt=$attempt " +
+          "clicked=$clicked"
+      )
+
+      return clicked
+    }
+
+    appendDebugLog(
+      "GPT→TG",
+      "CODE_REVEAL_FAILED reason=$lastFailure"
+    )
+
+    return false
+  }
+
+  private fun dispatchVisibleCodeCopyTap(
+    candidate: CopyButtonCandidate,
+    onFinished: (Boolean) -> Unit
+  ): Boolean {
+    if (!candidate.isCodeCopy) return false
+
+    val node = candidate.node
+
+    val packageName =
+      node.packageName?.toString().orEmpty()
+
+    if (
+      !isChatGptPackageForTgToGpt(packageName)
+    ) {
+      return false
+    }
+
+    val window = try {
+      node.window
+    } catch (_: Exception) {
+      null
+    } ?: return false
+
+    val root = try {
+      window.root
+    } catch (_: Exception) {
+      null
+    } ?: return false
+
+    val rootPackage =
+      root.packageName?.toString().orEmpty()
+
+    if (
+      !isChatGptPackageForTgToGpt(rootPackage)
+    ) {
+      return false
+    }
+
+    val buttonRect = android.graphics.Rect()
+    val windowRect = android.graphics.Rect()
+
+    try {
+      if (!node.isVisibleToUser) return false
+
+      node.getBoundsInScreen(buttonRect)
+      root.getBoundsInScreen(windowRect)
+    } catch (_: Exception) {
+      return false
+    }
+
+    val touchRect =
+      android.graphics.Rect(buttonRect)
+
+    if (
+      !touchRect.intersect(windowRect) ||
+      touchRect.width() <= 0 ||
+      touchRect.height() <= 0
+    ) {
+      return false
+    }
+
+    val centerX = touchRect.exactCenterX()
+    val centerY = touchRect.exactCenterY()
+
+    val path = android.graphics.Path().apply {
+      moveTo(centerX, centerY)
+    }
+
+    val builder =
+      android.accessibilityservice
+        .GestureDescription.Builder()
+
+    if (
+      android.os.Build.VERSION.SDK_INT >= 30
+    ) {
+      builder.setDisplayId(window.displayId)
+    }
+
+    val gesture = builder.addStroke(
+      android.accessibilityservice
+        .GestureDescription.StrokeDescription(
+          path,
+          0L,
+          90L
+        )
+    ).build()
+
+    return dispatchGesture(
+      gesture,
+      object :
+        android.accessibilityservice
+          .AccessibilityService.GestureResultCallback() {
+
+        override fun onCompleted(
+          gestureDescription:
+            android.accessibilityservice.GestureDescription
+        ) {
+          onFinished(true)
+        }
+
+        override fun onCancelled(
+          gestureDescription:
+            android.accessibilityservice.GestureDescription
+        ) {
+          onFinished(false)
+        }
+      },
+      android.os.Handler(
+        android.os.Looper.getMainLooper()
+      )
     )
   }
 
@@ -3664,6 +4998,256 @@ override fun onServiceConnected() {
     }
   }
 
+  private fun logGptCodeCopyUiStructure(
+    roots: List<AccessibilityNodeInfo>
+  ) {
+    val records = mutableListOf<String>()
+    var visited = 0
+
+    val codeCopyLabels = setOf(
+      "코드 복사",
+      "코드 복사 버튼",
+      "copy code",
+      "code copy",
+      "copy code button"
+    )
+
+    val copyLabels = setOf(
+      "복사",
+      "복사 버튼",
+      "copy",
+      "copy button"
+    )
+
+    val languageLabels = setOf(
+      "kotlin",
+      "java",
+      "javascript",
+      "typescript",
+      "python",
+      "bash",
+      "shell",
+      "json",
+      "html",
+      "css",
+      "xml",
+      "yaml",
+      "sql",
+      "plain text",
+      "text",
+      "tsx",
+      "jsx",
+      "swift",
+      "c++"
+    )
+
+    fun visit(
+      node: AccessibilityNodeInfo?,
+      depth: Int,
+      path: String
+    ) {
+      if (node == null || visited >= 1800) return
+
+      visited++
+
+      val packageName =
+        node.packageName?.toString().orEmpty()
+
+      if (
+        !isChatGptPackageForTgToGpt(packageName)
+      ) {
+        return
+      }
+
+      val rect = Rect()
+      node.getBoundsInScreen(rect)
+
+      val rawText = node.text?.toString().orEmpty()
+      val rawDesc =
+        node.contentDescription?.toString().orEmpty()
+
+      val labels = listOf(
+        rawText.trim().lowercase(),
+        rawDesc.trim().lowercase()
+      )
+
+      val kind = when {
+        labels.any { it in codeCopyLabels } ->
+          "CODE_COPY"
+
+        labels.any { it in copyLabels } ->
+          "COPY"
+
+        labels.any { it in languageLabels } ->
+          "LANGUAGE"
+
+        else -> "OTHER"
+      }
+
+      val interesting =
+        node.isClickable ||
+          rawDesc.isNotBlank() ||
+          kind != "OTHER"
+
+      if (
+        interesting &&
+        node.isVisibleToUser &&
+        !rect.isEmpty()
+      ) {
+        records.add(
+          "path=$path depth=$depth kind=$kind " +
+            "class=${node.className} " +
+            "viewId=${node.viewIdResourceName} " +
+            "clickable=${node.isClickable} " +
+            "enabled=${node.isEnabled} " +
+            "children=${node.childCount} " +
+            "textLen=${rawText.length} " +
+            "descLen=${rawDesc.length} " +
+            "bounds=${rect.left},${rect.top}," +
+            "${rect.right},${rect.bottom}"
+        )
+      }
+
+      for (index in 0 until node.childCount) {
+        visit(
+          node.getChild(index),
+          depth + 1,
+          "$path.$index"
+        )
+      }
+    }
+
+    roots.forEachIndexed { index, root ->
+      visit(root, 0, "$index")
+    }
+
+    appendDebugLog(
+      "GPT→TG",
+      "CODE_UI_STRUCTURE visited=$visited records=${records.size}"
+    )
+
+    records.takeLast(100).forEachIndexed { index, item ->
+      appendDebugLog(
+        "GPT→TG",
+        "CODE_UI_NODE[$index] $item"
+      )
+    }
+  }
+
+  private fun logGptCodeContainerTree(
+    aiRoots: List<AccessibilityNodeInfo>
+  ) {
+    var visited = 0
+    var matched = 0
+
+    val maxVisits = 400
+    val maxRecords = 32
+    val records = mutableListOf<String>()
+
+    fun visit(
+      node: AccessibilityNodeInfo,
+      path: String,
+      depth: Int
+    ) {
+      if (visited >= maxVisits || depth > 80) return
+
+      visited++
+
+      val className =
+        node.className?.toString().orEmpty()
+
+      val rawText = try {
+        node.text?.toString().orEmpty()
+      } catch (_: Exception) {
+        ""
+      }
+
+      val rawDesc = try {
+        node.contentDescription?.toString().orEmpty()
+      } catch (_: Exception) {
+        ""
+      }
+
+      val labels = listOf(
+        rawText.trim().lowercase(),
+        rawDesc.trim().lowercase()
+      )
+
+      val isCodeCopy = labels.any { value ->
+        value == "코드 복사" ||
+          value == "copy code" ||
+          value == "code copy" ||
+          value == "코드 복사 버튼" ||
+          value == "copy code button"
+      }
+
+      if (isCodeCopy || rawText.length >= 30) {
+        matched++
+
+        val rect = android.graphics.Rect()
+
+        try {
+          node.getBoundsInScreen(rect)
+        } catch (_: Exception) {
+          rect.setEmpty()
+        }
+
+        records.add(
+          "path=$path " +
+            "depth=$depth " +
+            "codeCopy=$isCodeCopy " +
+            "class=$className " +
+            "textLen=${rawText.length} " +
+            "descLen=${rawDesc.length} " +
+            "children=${node.childCount} " +
+            "bounds=${rect.left},${rect.top}," +
+            "${rect.right},${rect.bottom}"
+        )
+
+        if (records.size > maxRecords) {
+          records.removeAt(0)
+        }
+      }
+
+      val childCount = try {
+        node.childCount
+      } catch (_: Exception) {
+        0
+      }
+
+      for (index in 0 until childCount) {
+        if (visited >= maxVisits) break
+
+        val child = try {
+          node.getChild(index)
+        } catch (_: Exception) {
+          null
+        } ?: continue
+
+        visit(child, "$path.$index", depth + 1)
+      }
+    }
+
+    aiRoots.forEachIndexed { index, root ->
+      if (visited < maxVisits) {
+        visit(root, "$index", 0)
+      }
+    }
+
+    appendDebugLog(
+      "GPT→TG",
+      "CODE_TREE_SCAN visited=$visited " +
+        "matched=$matched recorded=${records.size}"
+    )
+
+    records.forEachIndexed { index, record ->
+      appendDebugLog(
+        "GPT→TG",
+        "CODE_TREE_NODE[$index] $record"
+      )
+    }
+  }
+
   private fun buildNodeLabel(node: AccessibilityNodeInfo?): String {
     if (node == null) return ""
     val parts = mutableListOf<String>()
@@ -3672,42 +5256,11 @@ override fun onServiceConnected() {
     return parts.joinToString(" ").trim()
   }
 
-    private fun tryPasteGptCopyButtonToTelegram(
+  private fun finishGptCopyButtonPasteAfterClick(
     gptOutputMode: String,
     aiRoots: List<AccessibilityNodeInfo>,
     autoSend: Boolean
   ): Boolean {
-    val copyButtons = mutableListOf<CopyButtonCandidate>()
-    aiRoots.forEach { root -> collectGptCopyButtonCandidates(root, copyButtons) }
-    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE candidates=${copyButtons.size} mode=$gptOutputMode")
-    logGptCopyButtonCandidates("COPY_BUTTON_PASTE", copyButtons)
-    val target = findBestGptCopyButtonForPaste(gptOutputMode, copyButtons)
-    if (target == null) {
-      appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE target=null mode=$gptOutputMode")
-      return false
-    }
-    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE target label=${compactLogPreview(target.label)} top=${target.top} left=${target.left} isCode=${target.isCodeCopy}")
-    if (gptOutputMode == "FULL") {
-        val copySentinel = "COPYBRIDGE_GPT_COPY_SENTINEL_${System.currentTimeMillis()}"
-
-        copyToClipboard(copySentinel)
-
-        appendDebugLog(
-
-            "GPT→TG",
-
-            "COPY_BUTTON_FULL_SENTINEL_SET length=${copySentinel.length}"
-
-        )
-
-        android.os.SystemClock.sleep(120L)
-
-    }
-
-    val clicked = clickExactGptCopyCandidate(target)
-    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE clicked=$clicked")
-    if (!clicked) return false
-    android.os.SystemClock.sleep(900L)
     val tgRoots = getTelegramRoots()
     appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE telegramRoots=${tgRoots.size}")
     if (tgRoots.isEmpty()) return false
@@ -3798,6 +5351,285 @@ override fun onServiceConnected() {
     return true
   }
 
+  private fun startCodeCopyGestureFallback(
+    autoSend: Boolean
+  ): Boolean {
+    if (codeGestureInFlight) {
+      appendDebugLog(
+        "GPT→TG",
+        "CODE_GESTURE_DISPATCH accepted=false reason=inFlight"
+      )
+      return true
+    }
+
+    val state = loadRoundTripState()
+    if (state.phase != ROUND_TRIP_PHASE_GPT_TO_TG_SENDING) {
+      return false
+    }
+
+    val expectedCreatedAtMs = state.createdAtMs
+    val expectedRequestId = state.requestId
+
+    val refreshedCandidates =
+      mutableListOf<CopyButtonCandidate>()
+
+    getAiRoots().forEach { root ->
+      collectGptCopyButtonCandidates(
+        root,
+        refreshedCandidates
+      )
+    }
+
+    val candidate =
+      findBestGptCopyButtonForPaste(
+        "CODE",
+        refreshedCandidates
+      ) ?: return false
+
+    if (!candidate.isCodeCopy) return false
+
+    val bounds = android.graphics.Rect()
+    val window = try {
+      candidate.node.getBoundsInScreen(bounds)
+      candidate.node.window
+    } catch (_: Exception) {
+      null
+    } ?: return false
+
+    val displayId =
+      if (android.os.Build.VERSION.SDK_INT >= 30) {
+        window.displayId
+      } else {
+        0
+      }
+
+    val sentinel =
+      "__COPYBRIDGE_CODE_GESTURE_SENTINEL_${System.currentTimeMillis()}"
+
+    copyToClipboard(sentinel)
+    codeGestureInFlight = true
+
+    val dispatched = dispatchVisibleCodeCopyTap(
+      candidate
+    ) { completed ->
+      if (!completed) {
+        appendDebugLog(
+          "GPT→TG",
+          "CODE_GESTURE_CANCELLED displayId=$displayId"
+        )
+        codeGestureInFlight = false
+
+        val current = loadRoundTripState()
+        if (
+          current.phase == ROUND_TRIP_PHASE_GPT_TO_TG_SENDING &&
+          current.createdAtMs == expectedCreatedAtMs &&
+          current.requestId == expectedRequestId
+        ) {
+          onRoundTripTelegramSendFailed(
+            "codeGestureCancelled"
+          )
+        }
+        return@dispatchVisibleCodeCopyTap
+      }
+
+      appendDebugLog(
+        "GPT→TG",
+        "CODE_GESTURE_COMPLETED displayId=$displayId"
+      )
+
+      Handler(Looper.getMainLooper()).postDelayed({
+        if (activeService !== this) {
+          codeGestureInFlight = false
+          return@postDelayed
+        }
+
+        val current = loadRoundTripState()
+        val sessionMatches =
+          current.phase == ROUND_TRIP_PHASE_GPT_TO_TG_SENDING &&
+            current.createdAtMs == expectedCreatedAtMs &&
+            current.requestId == expectedRequestId
+
+        if (!sessionMatches) {
+          codeGestureInFlight = false
+          return@postDelayed
+        }
+
+        val copied = readClipboardText()
+        val clipboardChanged =
+          copied.isNotBlank() &&
+            copied != sentinel &&
+            !copied.startsWith(
+              "__COPYBRIDGE_CODE_GESTURE_SENTINEL_"
+            )
+
+        appendDebugLog(
+          "GPT→TG",
+          "CODE_GESTURE_CLIPBOARD changed=$clipboardChanged length=${copied.length}"
+        )
+
+        if (!clipboardChanged) {
+          codeGestureInFlight = false
+          onRoundTripTelegramSendFailed(
+            "codeGestureClipboardUnchanged"
+          )
+          return@postDelayed
+        }
+
+        val pasted =
+          finishGptCopyButtonPasteAfterClick(
+            "CODE",
+            getAiRoots(),
+            autoSend
+          )
+
+        appendDebugLog(
+          "GPT→TG",
+          "CODE_GESTURE_PASTE success=$pasted"
+        )
+
+        codeGestureInFlight = false
+
+        if (!pasted) {
+          onRoundTripTelegramSendFailed(
+            "codeGesturePasteFailed"
+          )
+        }
+      }, 900L)
+    }
+
+    appendDebugLog(
+      "GPT→TG",
+      "CODE_GESTURE_DISPATCH accepted=$dispatched " +
+        "bounds=${bounds.left},${bounds.top},${bounds.right},${bounds.bottom} " +
+        "displayId=$displayId"
+    )
+
+    if (!dispatched) {
+      codeGestureInFlight = false
+    }
+
+    return dispatched
+  }
+
+  private fun tryPasteGptCopyButtonToTelegram(
+    gptOutputMode: String,
+    aiRoots: List<AccessibilityNodeInfo>,
+    autoSend: Boolean
+  ): Boolean {
+    if (gptOutputMode == "CODE") {
+      val codeText =
+        extractGptCodeBodyDirectly(
+          aiRoots
+        )
+
+      appendDebugLog(
+        "GPT→TG",
+        "CODE_DIRECT_EXTRACT " +
+          "found=${codeText != null} " +
+          "length=${codeText?.length ?: 0}"
+      )
+
+      if (codeText.isNullOrBlank()) {
+        return false
+      }
+
+      val tgEdit =
+        findEditableNodeFromRoots(
+          getTelegramRoots()
+        ) ?: return false
+
+      val setOk =
+        setTextToNode(
+          tgEdit,
+          codeText
+        )
+
+      if (!setOk) {
+        appendDebugLog(
+          "GPT→TG",
+          "CODE_DIRECT_INPUT setOk=false"
+        )
+        return false
+      }
+
+      val refreshedEdit =
+        findEditableNodeFromRoots(
+          getTelegramRoots()
+        )
+
+      val confirmed =
+        refreshedEdit?.text
+          ?.toString() == codeText
+
+      appendDebugLog(
+        "GPT→TG",
+        "CODE_DIRECT_INPUT " +
+          "setOk=$setOk confirmed=$confirmed"
+      )
+
+      if (!confirmed || refreshedEdit == null) {
+        return false
+      }
+
+      if (autoSend) {
+        scheduleAutoSendAfterPaste(
+          "GPT→TG",
+          refreshedEdit
+        )
+      }
+
+      return true
+    }
+
+    val copyButtons = mutableListOf<CopyButtonCandidate>()
+    if (gptOutputMode == "CODE") {
+      logGptCodeContainerTree(aiRoots)
+    }
+    aiRoots.forEach { root -> collectGptCopyButtonCandidates(root, copyButtons) }
+    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE candidates=${copyButtons.size} mode=$gptOutputMode")
+    logGptCopyButtonCandidates("COPY_BUTTON_PASTE", copyButtons)
+    val target = findBestGptCopyButtonForPaste(gptOutputMode, copyButtons)
+    if (target == null) {
+      appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE target=null mode=$gptOutputMode")
+      return false
+    }
+    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE target label=${compactLogPreview(target.label)} top=${target.top} left=${target.left} isCode=${target.isCodeCopy}")
+    if (gptOutputMode == "FULL") {
+        val copySentinel = "COPYBRIDGE_GPT_COPY_SENTINEL_${System.currentTimeMillis()}"
+
+        copyToClipboard(copySentinel)
+
+        appendDebugLog(
+
+            "GPT→TG",
+
+            "COPY_BUTTON_FULL_SENTINEL_SET length=${copySentinel.length}"
+
+        )
+
+        android.os.SystemClock.sleep(120L)
+
+    }
+
+    val clicked = clickGptCopyCandidateWithReveal(
+      target,
+      gptOutputMode
+    )
+    appendDebugLog("GPT→TG", "COPY_BUTTON_PASTE clicked=$clicked")
+    if (clicked) {
+      android.os.SystemClock.sleep(900L)
+      return finishGptCopyButtonPasteAfterClick(
+        gptOutputMode,
+        aiRoots,
+        autoSend
+      )
+    }
+
+    if (gptOutputMode != "CODE") return false
+
+    return startCodeCopyGestureFallback(autoSend)
+  }
+
   private fun findBestGptCopyButtonForPaste(
     gptOutputMode: String,
     copyButtons: List<CopyButtonCandidate>
@@ -3805,9 +5637,9 @@ override fun onServiceConnected() {
     if (copyButtons.isEmpty()) return null
     val sorted = copyButtons.sortedWith(compareBy<CopyButtonCandidate> { it.top }.thenBy { it.left })
     return if (gptOutputMode == "CODE") {
-      val explicitCodeCopy = sorted.filter { it.isCodeCopy }
-      val rightSideCopy = sorted.filter { !it.isCodeCopy && (it.label.lowercase() == "복사" || it.label.lowercase() == "copy") && it.left >= 1200 }
-      (explicitCodeCopy + rightSideCopy).lastOrNull()
+      sorted
+        .filter { it.isCodeCopy }
+        .lastOrNull()
     } else {
       sorted.filter { !it.isCodeCopy }.lastOrNull()
     }
@@ -4948,8 +6780,11 @@ override fun onServiceConnected() {
     const val ROUND_TRIP_PHASE_GPT_DELIVERING = "GPT_DELIVERING"
     const val ROUND_TRIP_PHASE_AMBIGUOUS = "AMBIGUOUS"
     private const val ROUND_TRIP_PREFS = "copybridge_round_trip_state"
+    private const val ROUND_TRIP_REQUEST_ID_ENABLED = true
     private const val ROUND_TRIP_KEY_PHASE = "phase"
     private const val ROUND_TRIP_KEY_JOB_ID = "job_id"
+    private const val ROUND_TRIP_KEY_REQUEST_ID =
+      "request_id"
     private const val ROUND_TRIP_KEY_SEQUENCE = "sequence"
     private const val ROUND_TRIP_KEY_DIRECTION = "direction"
     private const val ROUND_TRIP_KEY_COLLECTED = "collected_json"
@@ -4962,7 +6797,21 @@ override fun onServiceConnected() {
     private const val ROUND_TRIP_KEY_MODE = "gpt_mode"
     private const val ROUND_TRIP_KEY_AUTO_SEND = "auto_send"
     private const val ROUND_TRIP_KEY_CREATED_AT = "created_at"
+    private const val ROUND_TRIP_KEY_RELAY_SENT_AT =
+      "relay_sent_at"
+    private const val ROUND_TRIP_KEY_TG_COLLECTOR_READY_AT =
+      "tg_collector_ready_at"
+    private const val ROUND_TRIP_KEY_TG_FALLBACK_ALLOWED =
+      "tg_fallback_allowed"
+    private const val ROUND_TRIP_KEY_RELAY_RETRYABLE_FAILURE_COUNT =
+      "relay_retryable_failure_count"
     private const val GPT_TO_TG_RESERVATION_MAX_AGE_MS = 12 * 60 * 60 * 1000L
+    private const val ROUND_TRIP_RELAY_POLL_INTERVAL_MS =
+      10_000L
+    private const val ROUND_TRIP_RELAY_CLOCK_SKEW_MS =
+      120_000L
+    private const val ROUND_TRIP_RELAY_COLLECTOR_GRACE_MS =
+      30_000L
     private const val ROUND_TRIP_MAX_COLLECTED_BLOCKS = 2000
     private const val ROUND_TRIP_MAX_COLLECTED_CHARS = 300_000
     private const val ROUND_TRIP_MIN_TEXT_OVERLAP = 32
@@ -5208,6 +7057,10 @@ override fun onServiceConnected() {
         return false
       }
 
+      if (gptOutputMode == "CODE") {
+        service.logGptCodeCopyUiStructure(aiRoots)
+      }
+
                   val copyButtonPasteOk = service.tryPasteGptCopyButtonToTelegram(gptOutputMode, aiRoots, autoSend)
                   if (copyButtonPasteOk) {
                     service.appendDebugLog("GPT→TG", "STOP copyButtonPaste success mode=$gptOutputMode")
@@ -5248,18 +7101,14 @@ override fun onServiceConnected() {
         service.appendDebugLog("GPT\u2192TG", "CODE_FALLBACK cleanedTexts=${cleanedTexts.size}")
 
         val codeBlocks = service.extractCodeBlocks(cleanedTexts)
-        val codeCandidates = cleanedTexts.filter { service.looksLikeCode(it) }
 
         service.appendDebugLog(
           "GPT\u2192TG",
-          "CODE_FALLBACK codeBlocks=${codeBlocks.size} codeCandidates=${codeCandidates.size}"
+          "CODE_FALLBACK codeBlocks=${codeBlocks.size}"
         )
 
-        val selectedCode = if (codeBlocks.isNotEmpty()) {
-          codeBlocks.last().trim()
-        } else {
-          codeCandidates.maxByOrNull { it.length }?.trim().orEmpty()
-        }
+        val selectedCode =
+          codeBlocks.lastOrNull()?.trim().orEmpty()
 
         service.appendDebugLog(
           "GPT\u2192TG",
@@ -5272,16 +7121,13 @@ override fun onServiceConnected() {
           val finalTexts = service.collectLatestAiAnswerFallbackTexts(aiRoots)
           val finalCodeBlocks = service.extractCodeBlocks(finalTexts)
 
-          val finalFull = if (finalCodeBlocks.isNotEmpty()) {
-            finalCodeBlocks.last().trim()
-          } else {
-            finalTexts.joinToString("\n")
-          }
+          val finalFull =
+            finalCodeBlocks.lastOrNull()?.trim().orEmpty()
 
           textToSend = service.clampCopyText(finalFull)
           service.appendDebugLog(
             "GPT→TG",
-            "CODE_FINAL_FALLBACK source=${if (finalCodeBlocks.isNotEmpty()) "codeBlocks" else "visibleTexts"} textLength=${textToSend.length}"
+            "CODE_FINAL_FALLBACK source=${if (finalCodeBlocks.isNotEmpty()) "codeBlocks" else "none"} textLength=${textToSend.length}"
           )
         }
           // CODE_EMPTY_FALLBACK restored with short-text guard
@@ -5298,6 +7144,19 @@ override fun onServiceConnected() {
         textToSend = service.clampCopyText(fullText)
       }
       // CODE dedupe call removed in 214: restore stable CODE transfer
+
+        if (gptOutputMode == "CODE" && textToSend.isBlank()) {
+          service.appendDebugLog(
+            "GPT→TG",
+            "CODE_SEND_BLOCKED reason=noCodeBlock"
+          )
+          Toast.makeText(
+            context,
+            "코드박스를 찾지 못해 전송하지 않았습니다.",
+            Toast.LENGTH_SHORT
+          ).show()
+          return false
+        }
 
         if (gptOutputMode == "CODE" && textToSend.trim().length < MIN_CODE_SEND_TEXT_LENGTH) {
           service.appendDebugLog(

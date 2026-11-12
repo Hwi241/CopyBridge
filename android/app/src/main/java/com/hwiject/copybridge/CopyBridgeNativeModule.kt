@@ -424,6 +424,55 @@ class CopyBridgeNativeModule(
     }
   }
 
+    @ReactMethod
+    fun saveRelayReadToken(
+        readToken: String,
+        promise: Promise
+    ) {
+        try {
+            val saved = CopyBridgeRelayTokenStore.save(
+                reactContext,
+                readToken
+            )
+
+            if (saved) {
+                promise.resolve(true)
+            } else {
+                promise.reject(
+                    "SAVE_RELAY_READ_TOKEN_FAILED",
+                    "Secure credential storage failed"
+                )
+            }
+        } catch (_: Exception) {
+            promise.reject(
+                "SAVE_RELAY_READ_TOKEN_FAILED",
+                "Secure credential storage failed"
+            )
+        }
+    }
+
+    @ReactMethod
+    fun getRelayReadTokenStatus(promise: Promise) {
+        try {
+            val status = Arguments.createMap()
+
+            status.putBoolean(
+                "hasToken",
+                CopyBridgeRelayTokenStore.hasToken(
+                    reactContext
+                )
+            )
+
+            promise.resolve(status)
+
+        } catch (_: Exception) {
+            promise.reject(
+                "GET_RELAY_READ_TOKEN_STATUS_FAILED",
+                "Could not check relay credential"
+            )
+        }
+    }
+
     companion object {
         private const val OPACITY_MIN_VALUE = 0.10f
         private const val OPACITY_MAX_VALUE = 1.0f
