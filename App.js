@@ -52,6 +52,9 @@ const API_USAGE_ROWS_PER_HOUR = 60;
 
 export default function App() {
   const [debugLogs, setDebugLogs] = useState('');
+  const [panelDisplayMode, setPanelDisplayMode] =
+    useState('PHONE');
+  const [dexPanelScale, setDexPanelScale] = useState(50);
   const [widgetOpacity, setWidgetOpacity] = useState(1);
   const [collapsedOpacity, setCollapsedOpacity] = useState(0.85);
   const [widgetOpacityTrackWidth, setWidgetOpacityTrackWidth] = useState(1);
@@ -128,6 +131,72 @@ export default function App() {
         '설정 실패',
         'YouTube 광고 자동 건너뛰기 설정을 저장하지 못했습니다.'
       );
+    }
+  };
+
+  const loadPanelDisplayMode = useCallback(async () => {
+    const nativeModule = getNativeModule();
+
+    if (
+      Platform.OS !== 'android' ||
+      typeof nativeModule?.getPanelDisplayMode !== 'function'
+    ) {
+      return;
+    }
+
+    try {
+      const saved =
+        await nativeModule.getPanelDisplayMode();
+
+      setPanelDisplayMode(
+        ['PHONE', 'AUTO', 'BOTH'].includes(saved)
+          ? saved
+          : 'PHONE'
+      );
+    } catch (error) {
+      setPanelDisplayMode('PHONE');
+    }
+  }, []);
+
+  const loadDexPanelScale = useCallback(async () => {
+    const nativeModule = NativeModules.CopyBridgeNativeModule;
+    if (
+      Platform.OS !== 'android' ||
+      typeof nativeModule?.getDexPanelScale !== 'function'
+    ) return;
+
+    try {
+      const saved = await nativeModule.getDexPanelScale();
+      if (
+        Number.isInteger(saved) &&
+        saved >= 50 &&
+        saved <= 100 &&
+        saved % 10 === 0
+      ) {
+        setDexPanelScale(saved);
+      } else {
+        setDexPanelScale(50);
+      }
+    } catch (error) {
+      setDexPanelScale(50);
+    }
+  }, []);
+
+  const changeDexPanelScale = async (percent) => {
+    const nativeModule = NativeModules.CopyBridgeNativeModule;
+    if (
+      Platform.OS !== 'android' ||
+      typeof nativeModule?.setDexPanelScale !== 'function'
+    ) {
+      Alert.alert('설정 실패', 'Android APK에서만 사용할 수 있습니다.');
+      return;
+    }
+
+    try {
+      const saved = await nativeModule.setDexPanelScale(percent);
+      setDexPanelScale(saved);
+    } catch (error) {
+      Alert.alert('설정 실패', 'DeX 패널 크기를 저장하지 못했습니다.');
     }
   };
 
@@ -472,6 +541,41 @@ const loadKeyboardShortcutSettings = useCallback(async () => {
     setCollapsedOpacity(snapOpacity(value));
   };
 
+  const changePanelDisplayMode = async (mode) => {
+    if (!['PHONE', 'AUTO', 'BOTH'].includes(mode)) {
+      return;
+    }
+
+    const nativeModule = getNativeModule();
+
+    if (
+      Platform.OS !== 'android' ||
+      typeof nativeModule?.setPanelDisplayMode !== 'function'
+    ) {
+      Alert.alert(
+        '설정 실패',
+        'Android APK에서 사용할 수 있습니다.'
+      );
+      return;
+    }
+
+    try {
+      const saved =
+        await nativeModule.setPanelDisplayMode(mode);
+
+      if (!['PHONE', 'AUTO', 'BOTH'].includes(saved)) {
+        throw new Error('Invalid saved mode');
+      }
+
+      setPanelDisplayMode(saved);
+    } catch (error) {
+      Alert.alert(
+        '설정 실패',
+        '패널 표시 모드를 저장하지 못했습니다.'
+      );
+    }
+  };
+
   const setWidgetOpacityValue = async (value) => {
     const nextValue = snapOpacity(value);
     setWidgetOpacity(nextValue);
@@ -626,6 +730,8 @@ const loadKeyboardShortcutSettings = useCallback(async () => {
   useEffect(() => {
     loadDebugLogs();
     loadOpacitySettings();
+    loadPanelDisplayMode();
+    loadDexPanelScale();
     loadKeyboardShortcutSettings();
     loadDeepSeekSettings();
     loadRelayReadTokenStatus();
@@ -634,6 +740,8 @@ const loadKeyboardShortcutSettings = useCallback(async () => {
   }, [
     loadDebugLogs,
     loadOpacitySettings,
+    loadPanelDisplayMode,
+    loadDexPanelScale,
     loadKeyboardShortcutSettings,
     loadDeepSeekSettings,
     loadRelayReadTokenStatus,
@@ -1017,6 +1125,108 @@ const loadKeyboardShortcutSettings = useCallback(async () => {
           </View>
 
           <Text style={styles.deepSeekKeyStatus}>Key 상태: {deepSeekKeyStatus}</Text>
+        </View>
+
+        <View style={styles.opacityCard}>
+          <Text style={styles.sectionTitle}>
+            패널 표시 모드
+          </Text>
+
+          <Text style={styles.opacityDescription}>
+            CopyBridge 패널을 표시할 화면을 선택합니다.
+          </Text>
+
+          <View style={styles.dexModeButtonListSpacing}>
+            {[
+              { value: 'PHONE', label: '휴대폰 전용' },
+              { value: 'AUTO', label: 'DeX 자동 이동' },
+              { value: 'BOTH', label: '휴대폰 + DeX 동시 표시' },
+            ].map((item) => {
+              const selected = panelDisplayMode === item.value;
+
+              return (
+                <TouchableOpacity
+                  key={item.value}
+                  style={
+                    selected
+                      ? styles.primaryButton
+                      : styles.secondaryButton
+                  }
+                  activeOpacity={0.8}
+                  onPress={() => changePanelDisplayMode(item.value)}
+                >
+                  <Text
+                    style={
+                      selected
+                        ? styles.primaryButtonText
+                        : styles.secondaryButtonText
+                    }
+                  >
+                    {selected ? '● ' : '○ '}
+                    {item.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          <Text
+            style={[
+              styles.opacityDescription,
+              styles.dexModeHelpSpacing,
+            ]}
+          >
+            {panelDisplayMode === 'PHONE'
+              ? '휴대폰 화면에만 패널을 표시합니다.'
+              : panelDisplayMode === 'AUTO'
+                ? 'DeX 연결 시 모니터로 이동하고 해제 시 휴대폰으로 돌아옵니다.'
+                : '휴대폰과 DeX 모니터에 각각 패널을 표시합니다.'}
+          </Text>
+        </View>
+
+        <View style={styles.opacityCard}>
+          <Text style={styles.sectionTitle}>
+            DeX 패널 크기
+          </Text>
+          <Text
+            style={[
+              styles.opacityDescription,
+              styles.dexScaleGuideSpacing,
+            ]}
+          >
+            DeX 패널 크기만 조절합니다. 휴대폰 패널에는 적용되지 않습니다.
+          </Text>
+          <View
+            style={[
+              { flexDirection: 'row', flexWrap: 'wrap' },
+              styles.dexScaleGridSpacing,
+            ]}
+          >
+            {[50, 60, 70, 80, 90, 100].map((value) => {
+              const selected = dexPanelScale === value;
+              return (
+                <TouchableOpacity
+                  key={value}
+                  activeOpacity={0.8}
+                  style={[
+                    selected ? styles.primaryButton : styles.secondaryButton,
+                    { minWidth: 76 },
+                  ]}
+                  onPress={() => changeDexPanelScale(value)}
+                >
+                  <Text
+                    style={
+                      selected
+                        ? styles.primaryButtonText
+                        : styles.secondaryButtonText
+                    }
+                  >
+                    {value}%
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
         </View>
 
         <View style={styles.opacityCard}>
@@ -1532,6 +1742,23 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 19,
     color: '#817A70',
+  },
+  dexModeButtonListSpacing: {
+    gap: 10,
+  },
+  dexModeHelpSpacing: {
+    marginTop: 16,
+    marginBottom: 0,
+    lineHeight: 20,
+  },
+  dexScaleGuideSpacing: {
+    marginTop: 8,
+    marginBottom: 16,
+    lineHeight: 20,
+  },
+  dexScaleGridSpacing: {
+    columnGap: 10,
+    rowGap: 10,
   },
   opacityLabel: {
     marginTop: 10,

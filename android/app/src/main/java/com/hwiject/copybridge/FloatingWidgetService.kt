@@ -4,8 +4,10 @@ import android.app.Service
 import android.animation.AnimatorSet
 import android.animation.ObjectAnimator
 import android.animation.StateListAnimator
+import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.hardware.display.DisplayManager
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -20,6 +22,7 @@ import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import android.view.Display
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
@@ -33,22 +36,104 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 class FloatingWidgetService : Service() {
-  private var windowManager: WindowManager? = null
-  private var floatingView: View? = null
-  private var layoutParams: WindowManager.LayoutParams? = null
-  private var preferences: SharedPreferences? = null
+  private class PanelSurface(
+    val name: String
+  ) {
+    var windowManager: WindowManager? = null
+    var floatingView: View? = null
+    var layoutParams: WindowManager.LayoutParams? = null
+    var widgetWindowContext: Context? = null
+    var activeDisplayId: Int = Display.DEFAULT_DISPLAY
+    var isCollapsed = false
+    var initialX = 0
+    var initialY = 0
+    var initialTouchX = 0f
+    var initialTouchY = 0f
+    var apiBalanceTextView: TextView? = null
+    var apiBalanceBoxView: TextView? = null
+  }
 
-  private var initialX = 0
-  private var initialY = 0
-  private var initialTouchX = 0f
-  private var initialTouchY = 0f
+  private val phonePanel = PanelSurface("PHONE")
+  private val dexPanel = PanelSurface("DEX")
+  private var activePanel = phonePanel
+
+  private fun <T> withPanel(
+    panel: PanelSurface,
+    block: () -> T
+  ): T {
+    val previous = activePanel
+    activePanel = panel
+    return try {
+      block()
+    } finally {
+      activePanel = previous
+    }
+  }
+
+  private var windowManager: WindowManager?
+    get() = activePanel.windowManager
+    set(value) { activePanel.windowManager = value }
+  private var floatingView: View?
+    get() = activePanel.floatingView
+    set(value) { activePanel.floatingView = value }
+  private var layoutParams: WindowManager.LayoutParams?
+    get() = activePanel.layoutParams
+    set(value) { activePanel.layoutParams = value }
+  private var preferences: SharedPreferences? = null
+  private var displayManager: DisplayManager? = null
+  private var widgetWindowContext: Context?
+    get() = activePanel.widgetWindowContext
+    set(value) { activePanel.widgetWindowContext = value }
+  private var activeDisplayId: Int
+    get() = activePanel.activeDisplayId
+    set(value) { activePanel.activeDisplayId = value }
+  private var dexOverlayBlocked = false
+
+  private val displayChangeHandler =
+    Handler(Looper.getMainLooper())
+
+  private val displayChangeRunnable = Runnable {
+    reconcilePanelDisplays()
+  }
+
+  private val displayListener =
+    object : DisplayManager.DisplayListener {
+      override fun onDisplayAdded(displayId: Int) {
+        dexOverlayBlocked = false
+        scheduleDisplayChangeCheck()
+      }
+
+      override fun onDisplayRemoved(displayId: Int) {
+        dexOverlayBlocked = false
+        scheduleDisplayChangeCheck()
+      }
+
+      override fun onDisplayChanged(displayId: Int) {
+        scheduleDisplayChangeCheck()
+      }
+    }
+
+  private var initialX: Int
+    get() = activePanel.initialX
+    set(value) { activePanel.initialX = value }
+  private var initialY: Int
+    get() = activePanel.initialY
+    set(value) { activePanel.initialY = value }
+  private var initialTouchX: Float
+    get() = activePanel.initialTouchX
+    set(value) { activePanel.initialTouchX = value }
+  private var initialTouchY: Float
+    get() = activePanel.initialTouchY
+    set(value) { activePanel.initialTouchY = value }
 
   private var widgetSize = WidgetSize.SMALL
   private var autoSendEnabled = false
   private var autoExchangeEnabled = false
   private var replyCopyModeString: String = "FULL"
   private var gptOutputModeString: String = "FULL"
-  private var isCollapsed = false
+  private var isCollapsed: Boolean
+    get() = activePanel.isCollapsed
+    set(value) { activePanel.isCollapsed = value }
   private var widgetOpacity = 1f
   private var collapsedOpacity = 0.85f
  private var lastBridgePairVisibleForAutoCollapse: Boolean? = null
@@ -64,8 +149,14 @@ class FloatingWidgetService : Service() {
   }
 
   private val apiBalanceHandler = Handler(Looper.getMainLooper())
-  private var apiBalanceTextView: TextView? = null
-  private var apiBalanceBoxView: TextView? = null
+  private var apiBalanceTextView: TextView?
+    get() = activePanel.apiBalanceTextView
+    set(value) { activePanel.apiBalanceTextView = value }
+  private var apiBalanceBoxView: TextView?
+    get() = activePanel.apiBalanceBoxView
+    set(value) { activePanel.apiBalanceBoxView = value }
+  private var lastPanelActionKind = ""
+  private var lastPanelActionAt = 0L
   private var apiBalanceText = "$" + "KEY"
   private var apiBalanceRefreshing = false
   private val apiBalanceHistory = mutableListOf<Pair<Long, Double>>()
@@ -98,14 +189,39 @@ class FloatingWidgetService : Service() {
   override fun onCreate() {
  CopyBridgeKeyboardShortcutBridge.attach(this)
     super.onCreate()
-    windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+    phonePanel.windowManager =
+      getSystemService(WINDOW_SERVICE) as WindowManager
     preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
     loadWidgetPreferences()
+    displayManager =
+      getSystemService(DISPLAY_SERVICE) as DisplayManager
+
+    displayManager?.registerDisplayListener(
+      displayListener,
+      displayChangeHandler
+    )
+
+    isServiceRunning = true
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    if (intent?.action == ACTION_PANEL_MODE_CHANGED) {
+      appendDebugLog(
+        "WIDGET",
+        "PANEL_MODE_CHANGED " +
+          "mode=${panelDisplayMode()} " +
+          "activeDisplay=${phonePanel.activeDisplayId} " +
+          "widgetExists=${phonePanel.floatingView != null}"
+      )
+
+      dexOverlayBlocked = false
+      reconcilePanelDisplays()
+
+      return START_STICKY
+    }
+
     if (intent?.action == ACTION_REFRESH_WIDGET) {
-      refreshWidgetAtSamePosition()
+      refreshAllVisiblePanels()
       return START_STICKY
     }
 
@@ -120,7 +236,7 @@ class FloatingWidgetService : Service() {
       return START_NOT_STICKY
     }
 
-    showFloatingWidget()
+    reconcilePanelDisplays()
     return START_STICKY
   }
 
@@ -133,7 +249,20 @@ class FloatingWidgetService : Service() {
     bridgeVisibilityMonitorRunning = false
     bridgeVisibilityHandler.removeCallbacks(bridgeVisibilityMonitorRunnable)
     apiBalanceHandler.removeCallbacks(apiBalanceRunnable)
-    removeFloatingWidget()
+    withPanel(phonePanel) { removeFloatingWidget() }
+    withPanel(dexPanel) { removeFloatingWidget() }
+    isServiceRunning = false
+
+    displayChangeHandler.removeCallbacks(
+      displayChangeRunnable
+    )
+
+    try {
+      displayManager?.unregisterDisplayListener(
+        displayListener
+      )
+    } catch (_: Exception) {
+    }
     super.onDestroy()
   }
 
@@ -148,7 +277,10 @@ class FloatingWidgetService : Service() {
       "CODE" -> "CODE"
       else -> "FULL"
     }
-    isCollapsed = prefs.getBoolean(KEY_WIDGET_COLLAPSED, false)
+    isCollapsed = prefs.getBoolean(
+      collapsedPreferenceKey(),
+      false
+    )
     widgetOpacity = clampWidgetOpacity(prefs.getFloat(KEY_WIDGET_OPACITY, OPACITY_DEFAULT_WIDGET))
     collapsedOpacity = clampWidgetOpacity(prefs.getFloat(KEY_COLLAPSED_OPACITY, OPACITY_DEFAULT_COLLAPSED))
   }
@@ -161,26 +293,387 @@ class FloatingWidgetService : Service() {
       .putBoolean(KEY_AUTO_EXCHANGE_ENABLED, autoExchangeEnabled)
       .putString(KEY_REPLY_COPY_MODE, replyCopyModeString)
       .putString(KEY_GPT_OUTPUT_MODE, gptOutputModeString)
-      .putBoolean(KEY_WIDGET_COLLAPSED, isCollapsed)
+      .putBoolean(collapsedPreferenceKey(), isCollapsed)
       .putFloat(KEY_WIDGET_OPACITY, clampWidgetOpacity(widgetOpacity))
       .putFloat(KEY_COLLAPSED_OPACITY, clampWidgetOpacity(collapsedOpacity))
       .apply()
   }
 
   private fun getSavedWidgetX(): Int {
-    return preferences?.getInt(KEY_WIDGET_X, 40) ?: 40
+    val key =
+      if (activeDisplayId == Display.DEFAULT_DISPLAY) {
+        KEY_WIDGET_X
+      } else {
+        KEY_WIDGET_DEX_X
+      }
+
+    return preferences?.getInt(key, 40) ?: 40
   }
 
   private fun getSavedWidgetY(): Int {
-    return preferences?.getInt(KEY_WIDGET_Y, 320) ?: 320
+    val key =
+      if (activeDisplayId == Display.DEFAULT_DISPLAY) {
+        KEY_WIDGET_Y
+      } else {
+        KEY_WIDGET_DEX_Y
+      }
+
+    return preferences?.getInt(key, 320) ?: 320
   }
 
   private fun saveWidgetPosition(x: Int, y: Int) {
-    val prefs = preferences ?: return
-    prefs.edit()
-      .putInt(KEY_WIDGET_X, x)
-      .putInt(KEY_WIDGET_Y, y)
-      .apply()
+    val xKey =
+      if (activeDisplayId == Display.DEFAULT_DISPLAY) {
+        KEY_WIDGET_X
+      } else {
+        KEY_WIDGET_DEX_X
+      }
+
+    val yKey =
+      if (activeDisplayId == Display.DEFAULT_DISPLAY) {
+        KEY_WIDGET_Y
+      } else {
+        KEY_WIDGET_DEX_Y
+      }
+
+    preferences?.edit()
+      ?.putInt(xKey, x)
+      ?.putInt(yKey, y)
+      ?.apply()
+  }
+
+  private fun scheduleDisplayChangeCheck() {
+    displayChangeHandler.removeCallbacks(
+      displayChangeRunnable
+    )
+    displayChangeHandler.postDelayed(
+      displayChangeRunnable,
+      300L
+    )
+  }
+
+  private fun panelDisplayMode(): String {
+    return preferences?.getString(
+      "panel_display_mode",
+      "PHONE"
+    ) ?: "PHONE"
+  }
+
+  private fun describePanelDisplays(
+    displays: Array<Display>
+  ): String {
+    if (displays.isEmpty()) return "none"
+
+    return displays.joinToString(";") { display ->
+      "id=${display.displayId}" +
+        ",flags=${display.flags}" +
+        ",valid=${display.isValid}" +
+        ",name=${display.name.take(60)}"
+    }
+  }
+
+  private fun findDexDisplayForCurrentMode(): Display? {
+    val mode = panelDisplayMode()
+    val wantsDex =
+      (mode == "AUTO" && activePanel === phonePanel) ||
+        (mode == "BOTH" && activePanel === dexPanel)
+
+    if (!wantsDex) return null
+
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+      appendDebugLog(
+        "WIDGET",
+        "PANEL_AUTO_UNSUPPORTED sdk=${Build.VERSION.SDK_INT}"
+      )
+      return null
+    }
+
+    if (dexOverlayBlocked) {
+      appendDebugLog(
+        "WIDGET",
+        "PANEL_AUTO_BLOCKED previousOverlayFailure=true"
+      )
+      return null
+    }
+
+    val manager = displayManager
+
+    if (manager == null) {
+      appendDebugLog(
+        "WIDGET",
+        "PANEL_AUTO_NO_DISPLAY_MANAGER"
+      )
+      return null
+    }
+
+    return try {
+      val desktopDisplays = manager.getDisplays(
+        "com.samsung.android.hardware.display.category.DESKTOP"
+      )
+
+      val presentationDisplays = manager.getDisplays(
+        DisplayManager.DISPLAY_CATEGORY_PRESENTATION
+      )
+
+      val allDisplays = manager.displays
+
+      val samsungCandidate = desktopDisplays.firstOrNull {
+        it.displayId != Display.DEFAULT_DISPLAY &&
+          it.isValid
+      }
+
+      val hdmiCandidates = presentationDisplays.filter { display ->
+        display.displayId != Display.DEFAULT_DISPLAY &&
+          display.isValid &&
+          display.name.contains("HDMI", ignoreCase = true) &&
+          allDisplays.any {
+            it.displayId == display.displayId && it.isValid
+          }
+      }
+
+      val hdmiCandidate = hdmiCandidates.singleOrNull()
+
+      val selected = samsungCandidate ?: hdmiCandidate
+
+      val source = when {
+        samsungCandidate != null -> "SAMSUNG_DESKTOP"
+        hdmiCandidate != null -> "PRESENTATION_HDMI"
+        else -> "NONE"
+      }
+
+      appendDebugLog(
+        "WIDGET",
+        "PANEL_AUTO_SCAN " +
+          "desktop=${desktopDisplays.size} " +
+          "presentation=${presentationDisplays.size} " +
+          "all=${allDisplays.size} " +
+          "hdmiCandidates=${hdmiCandidates.size} " +
+          "source=$source " +
+          "selected=${selected?.displayId ?: -1}"
+      )
+
+      appendDebugLog(
+        "WIDGET",
+        "PANEL_AUTO_DISPLAYS " +
+          "desktop=[${describePanelDisplays(desktopDisplays)}] " +
+          "presentation=[${describePanelDisplays(presentationDisplays)}] " +
+          "all=[${describePanelDisplays(allDisplays)}]"
+      )
+
+      selected
+    } catch (error: Exception) {
+      appendDebugLog(
+        "WIDGET",
+        "PANEL_DEX_DISCOVERY_ERROR " +
+          "${error.javaClass.simpleName} " +
+          error.message.orEmpty().take(160)
+      )
+      null
+    }
+  }
+
+  private fun collapsedPreferenceKey(): String {
+    return if (activeDisplayId == Display.DEFAULT_DISPLAY) {
+      KEY_WIDGET_COLLAPSED
+    } else {
+      KEY_WIDGET_DEX_COLLAPSED
+    }
+  }
+
+  private fun widgetViewContext(): Context {
+    return widgetWindowContext ?: this
+  }
+
+  private fun dexPanelScaleFactor(): Float {
+    val percent = preferences?.getInt(
+      "dex_panel_scale_percent",
+      50
+    ) ?: 50
+    return percent.coerceIn(50, 100) / 100f
+  }
+
+  private class ScaledWidgetHost(
+    context: Context,
+    private val factor: Float,
+    child: View
+  ) : android.view.ViewGroup(context) {
+    init {
+      clipChildren = false
+      clipToPadding = false
+      addView(
+        child,
+        android.view.ViewGroup.LayoutParams(
+          android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+          android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+      )
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+      val child = getChildAt(0)
+      child.measure(
+        MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED),
+        MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED)
+      )
+      setMeasuredDimension(
+        kotlin.math.ceil(child.measuredWidth * factor.toDouble())
+          .toInt().coerceAtLeast(1),
+        kotlin.math.ceil(child.measuredHeight * factor.toDouble())
+          .toInt().coerceAtLeast(1)
+      )
+    }
+
+    override fun onLayout(
+      changed: Boolean,
+      left: Int,
+      top: Int,
+      right: Int,
+      bottom: Int
+    ) {
+      val child = getChildAt(0)
+      child.layout(0, 0, child.measuredWidth, child.measuredHeight)
+      child.pivotX = 0f
+      child.pivotY = 0f
+      child.scaleX = factor
+      child.scaleY = factor
+    }
+  }
+
+  private fun reconcilePanelDisplays() {
+    val mode = panelDisplayMode()
+
+    withPanel(phonePanel) {
+      val desiredId =
+        if (mode == "AUTO") {
+          findDexDisplayForCurrentMode()?.displayId
+            ?: Display.DEFAULT_DISPLAY
+        } else {
+          Display.DEFAULT_DISPLAY
+        }
+
+      if (floatingView == null) {
+        showFloatingWidget()
+      } else if (activeDisplayId != desiredId) {
+        refreshWidgetAtSamePosition()
+      }
+    }
+
+    withPanel(dexPanel) {
+      val dexDisplay =
+        if (mode == "BOTH") findDexDisplayForCurrentMode() else null
+
+      when {
+        dexDisplay == null -> removeFloatingWidget()
+        floatingView == null -> showFloatingWidget()
+        activeDisplayId != dexDisplay.displayId -> refreshWidgetAtSamePosition()
+      }
+    }
+
+    appendDebugLog(
+      "WIDGET",
+      "PANEL_RECONCILE mode=$mode " +
+        "phone=${phonePanel.floatingView != null} " +
+        "phoneDisplay=${phonePanel.activeDisplayId} " +
+        "dex=${dexPanel.floatingView != null} " +
+        "dexDisplay=${dexPanel.activeDisplayId}"
+    )
+  }
+
+  private fun refreshAllVisiblePanels() {
+    withPanel(phonePanel) {
+      if (floatingView != null) refreshWidgetAtSamePosition()
+    }
+    withPanel(dexPanel) {
+      if (floatingView != null) refreshWidgetAtSamePosition()
+    }
+  }
+
+  private fun acceptPanelAction(kind: String): Boolean {
+    if (panelDisplayMode() != "BOTH") return true
+    val now = android.os.SystemClock.elapsedRealtime()
+    if (
+      lastPanelActionKind == kind &&
+      now - lastPanelActionAt < 650L
+    ) {
+      appendDebugLog(
+        "WIDGET",
+        "PANEL_DUPLICATE_TAP_BLOCKED kind=$kind"
+      )
+      return false
+    }
+    lastPanelActionKind = kind
+    lastPanelActionAt = now
+    return true
+  }
+
+  private fun bindWidgetToTargetDisplay() {
+    val dexDisplay = findDexDisplayForCurrentMode()
+    val desiredId =
+      dexDisplay?.displayId ?: Display.DEFAULT_DISPLAY
+
+    if (
+      windowManager != null &&
+      activeDisplayId == desiredId
+    ) {
+      appendDebugLog(
+        "WIDGET",
+        "PANEL_TARGET_UNCHANGED " +
+          "mode=${panelDisplayMode()} " +
+          "display=$activeDisplayId"
+      )
+      return
+    }
+
+    if (floatingView != null) {
+      removeFloatingWidget()
+    }
+
+    if (dexDisplay != null) {
+      try {
+        val context = createDisplayContext(dexDisplay)
+          .createWindowContext(
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            null
+          )
+
+        val manager =
+          context.getSystemService(
+            Context.WINDOW_SERVICE
+          ) as WindowManager
+
+        widgetWindowContext = context
+        windowManager = manager
+        activeDisplayId = dexDisplay.displayId
+      } catch (error: Exception) {
+        dexOverlayBlocked = true
+
+        appendDebugLog(
+          "WIDGET",
+          "PANEL_DEX_BIND_FAILED display=${dexDisplay.displayId} " +
+            "error=${error.javaClass.simpleName} " +
+            error.message.orEmpty().take(160)
+        )
+        widgetWindowContext = null
+        windowManager =
+          getSystemService(WINDOW_SERVICE) as WindowManager
+        activeDisplayId = Display.DEFAULT_DISPLAY
+      }
+    } else {
+      widgetWindowContext = null
+      windowManager =
+        getSystemService(WINDOW_SERVICE) as WindowManager
+      activeDisplayId = Display.DEFAULT_DISPLAY
+    }
+
+    isCollapsed = preferences?.getBoolean(
+      collapsedPreferenceKey(),
+      false
+    ) ?: false
+
+    appendDebugLog(
+      "WIDGET",
+      "PANEL_DISPLAY_BOUND mode=${panelDisplayMode()} display=$activeDisplayId collapsed=$isCollapsed"
+    )
   }
 
   private fun canDrawOverlay(): Boolean {
@@ -195,12 +688,30 @@ class FloatingWidgetService : Service() {
     val prefs = getSharedPreferences("copybridge_floating_widget", MODE_PRIVATE)
     widgetOpacity = clampWidgetOpacity(prefs.getFloat(KEY_WIDGET_OPACITY, OPACITY_DEFAULT_WIDGET))
     collapsedOpacity = clampWidgetOpacity(prefs.getFloat(KEY_COLLAPSED_OPACITY, OPACITY_DEFAULT_COLLAPSED))
+    bindWidgetToTargetDisplay()
+    if (
+      activePanel === dexPanel &&
+      activeDisplayId == Display.DEFAULT_DISPLAY
+    ) {
+      appendDebugLog("WIDGET", "PANEL_DEX_SECONDARY_SKIPPED")
+      return
+    }
     if (floatingView != null) {
       Toast.makeText(this, "CopyBridge 위젯이 이미 실행 중입니다.", Toast.LENGTH_SHORT).show()
       return
     }
 
-    val widgetView = createWidgetView()
+    val contentView = createWidgetView()
+    val widgetView =
+      if (activeDisplayId != Display.DEFAULT_DISPLAY) {
+        ScaledWidgetHost(
+          widgetViewContext(),
+          dexPanelScaleFactor(),
+          contentView
+        )
+      } else {
+        contentView
+      }
 
     val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -229,11 +740,42 @@ class FloatingWidgetService : Service() {
       Toast.makeText(this, "CopyBridge 위젯을 시작했습니다.", Toast.LENGTH_SHORT).show()
       startBridgeVisibilityAutoCollapseMonitor()
       startDeepSeekBalanceAutoRefresh()
-    } catch (_: Exception) {
+    } catch (error: Exception) {
+      appendDebugLog(
+        "WIDGET",
+        "PANEL_ADD_FAILED display=$activeDisplayId " +
+          "error=${error.javaClass.simpleName} " +
+          error.message.orEmpty().take(160)
+      )
+
       floatingView = null
       layoutParams = null
-      Toast.makeText(this, "위젯을 표시하지 못했습니다.", Toast.LENGTH_SHORT).show()
-      stopSelf()
+      apiBalanceTextView = null
+      apiBalanceBoxView = null
+
+      if (activePanel === dexPanel) {
+        dexOverlayBlocked = true
+        appendDebugLog("WIDGET", "PANEL_DEX_SECONDARY_ADD_FAILED")
+        removeFloatingWidget()
+      } else if (activeDisplayId != Display.DEFAULT_DISPLAY) {
+        dexOverlayBlocked = true
+
+        appendDebugLog(
+          "WIDGET",
+          "PANEL_FALLBACK_TO_PHONE"
+        )
+
+        bindWidgetToTargetDisplay()
+        showFloatingWidget()
+      } else {
+        Toast.makeText(
+          this,
+          "위젯을 표시하지 못했습니다.",
+          Toast.LENGTH_SHORT
+        ).show()
+
+        stopSelf()
+      }
     }
   }
 
@@ -276,6 +818,7 @@ class FloatingWidgetService : Service() {
   private fun runTelegramToGptWithTemporaryWidgetHide(
     source: String
   ) {
+    val ownerPanel = activePanel
     val currentParams = layoutParams
     val currentX = currentParams?.x ?: getSavedWidgetX()
     val currentY = currentParams?.y ?: getSavedWidgetY()
@@ -303,7 +846,8 @@ class FloatingWidgetService : Service() {
     }
 
     Handler(Looper.getMainLooper()).postDelayed({
-      try {
+      withPanel(ownerPanel) {
+       try {
         appendDebugLog(
           "WIDGET",
           "TG_TO_GPT_HIDE_WIDGET_RUN source=$source replyMode=$replyCopyModeString autoSend=$autoSendEnabled"
@@ -316,8 +860,12 @@ class FloatingWidgetService : Service() {
         )
       } finally {
         Handler(Looper.getMainLooper()).postDelayed({
-          try {
-            if (floatingView == null) {
+          withPanel(ownerPanel) {
+           try {
+            val stillWanted =
+              ownerPanel === phonePanel ||
+                panelDisplayMode() == "BOTH"
+            if (stillWanted && floatingView == null) {
               showFloatingWidget()
               layoutParams?.x = currentX
               layoutParams?.y = currentY
@@ -329,21 +877,20 @@ class FloatingWidgetService : Service() {
                 "TG_TO_GPT_HIDE_WIDGET_RESTORE source=$source x=$currentX y=$currentY"
               )
             }
-          } catch (e: Exception) {
+           } catch (e: Exception) {
             appendDebugLog(
               "WIDGET",
               "TG_TO_GPT_HIDE_WIDGET_RESTORE_ERROR ${e.javaClass.simpleName}: ${e.message.orEmpty().take(120)}"
             )
+           }
           }
         }, 250L)
+      }
       }
     }, 350L)
   }
 
   private fun cycleWidgetSize() {
-    val currentX = layoutParams?.x ?: 40
-    val currentY = layoutParams?.y ?: 320
-
     widgetSize = when (widgetSize) {
       WidgetSize.COMPACT -> WidgetSize.SMALL
       WidgetSize.SMALL -> WidgetSize.MEDIUM
@@ -352,20 +899,13 @@ class FloatingWidgetService : Service() {
       WidgetSize.EXTRA_LARGE -> WidgetSize.COMPACT
     }
 
-    removeFloatingWidget()
-    showFloatingWidget()
-
-    layoutParams?.let { newParams ->
-      newParams.x = currentX
-      newParams.y = currentY
-      windowManager?.updateViewLayout(floatingView, newParams)
-    }
-
     saveWidgetPreferences()
+    refreshAllVisiblePanels()
     Toast.makeText(this, "위젯 크기: ${widgetSize.label}", Toast.LENGTH_SHORT).show()
   }
 
   private fun createWidgetView(): View {
+    val ownerPanel = activePanel
     val (gptBusy, telegramTyping, bridgeStatusText) = loadBridgeStatusForWidget()
     val roundTrip = CopyBridgeAccessibilityService.getRoundTripUiState(this)
     val isBridgeBusy = gptBusy || telegramTyping
@@ -402,14 +942,14 @@ class FloatingWidgetService : Service() {
 
     appendDebugLog("WIDGET", "WIDGET_STYLE_STATE gptBusy=$gptBusy telegramTyping=$telegramTyping background=$widgetBackgroundName")
 
-    val panel = LinearLayout(this).apply {
+    val panel = LinearLayout(widgetViewContext()).apply {
       orientation = LinearLayout.VERTICAL
       setPadding(size.panelPaddingHorizontal, size.panelPaddingTop, size.panelPaddingHorizontal, size.panelPaddingBottom)
       background = roundedBackground(widgetBackgroundColor, 18f)
       elevation = 12f
     }
 
-    val header = LinearLayout(this).apply {
+    val header = LinearLayout(widgetViewContext()).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER_VERTICAL
     }
@@ -418,7 +958,7 @@ class FloatingWidgetService : Service() {
       isCollapsed = true; saveWidgetPreferences(); refreshWidgetAtSamePosition()
     }
 
-    val title = TextView(this).apply {
+    val title = TextView(widgetViewContext()).apply {
       text = "Bridge"; setTextColor(widgetPrimaryTextColor); textSize = size.titleTextSize
       typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER_VERTICAL
     }
@@ -441,7 +981,7 @@ class FloatingWidgetService : Service() {
     val replyCopyLabel = if (replyCopyModeString == "LAST") "답변: 마지막" else "답변: 전체"
     val replyCopyButton = createDarkButton(replyCopyLabel, size.buttonTextSize) {
       replyCopyModeString = if (replyCopyModeString == "LAST") "FULL" else "LAST"
-      saveWidgetPreferences(); refreshWidgetAtSamePosition()
+      saveWidgetPreferences(); refreshAllVisiblePanels()
     }
 
     val gptOutputLabel = if (gptOutputModeString == "CODE") "GPT: 코드" else "GPT: 전체"
@@ -453,11 +993,11 @@ class FloatingWidgetService : Service() {
         if (gptOutputModeString == "CODE") "GPT 코드 모드로 전송합니다." else "GPT 전체 모드로 전송합니다.",
         Toast.LENGTH_SHORT
       ).show()
-      refreshWidgetAtSamePosition()
+      refreshAllVisiblePanels()
     }
 
     val autoSendLabel = if (autoSendEnabled) "전송: 켬" else "전송: 끔"
-    val autoSendButton = TextView(this).apply {
+    val autoSendButton = TextView(widgetViewContext()).apply {
       text = autoSendLabel
       setTextColor(Color.WHITE)
       textSize = size.buttonTextSize
@@ -469,7 +1009,11 @@ class FloatingWidgetService : Service() {
       setPadding(8, 0, 8, 0)
       setOnClickListener { view ->
         view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-        autoSendEnabled = !autoSendEnabled; saveWidgetPreferences(); refreshWidgetAtSamePosition()
+        withPanel(ownerPanel) {
+          autoSendEnabled = !autoSendEnabled
+          saveWidgetPreferences()
+          refreshAllVisiblePanels()
+        }
       }
       minHeight = 0
       minimumHeight = 0
@@ -488,10 +1032,11 @@ class FloatingWidgetService : Service() {
       }
       autoExchangeEnabled = !autoExchangeEnabled
       saveWidgetPreferences()
-      refreshWidgetAtSamePosition()
+      refreshAllVisiblePanels()
     }
 
     val gptButton = createWhiteButton("GPT로 보내기", size.buttonTextSize) {
+      if (!acceptPanelAction("TG_TO_GPT")) return@createWhiteButton
             appendDebugLog("WIDGET", "tap GPT로 보내기 replyMode=$replyCopyModeString autoSend=$autoSendEnabled")
       runTelegramToGptSmart("normal")
     }
@@ -502,6 +1047,7 @@ class FloatingWidgetService : Service() {
     updateApiBalanceBoxText()
 
     val tgButton = createTelegramBlueButton(roundTripTelegramButtonLabel(roundTrip), size.buttonTextSize) {
+      if (!acceptPanelAction("GPT_TO_TG")) return@createTelegramBlueButton
       appendDebugLog("WIDGET", "tap 텔레그램으로 보내기 gptMode=$gptOutputModeString autoSend=$autoSendEnabled autoExchange=$autoExchangeEnabled")
       if (autoExchangeEnabled && !autoSendEnabled && roundTrip.phase == CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_IDLE) {
         Toast.makeText(
@@ -530,7 +1076,10 @@ class FloatingWidgetService : Service() {
     panel.addView(createBridgeStatusTextView(bridgeStatusText))
 
     panel.alpha = widgetOpacity
-    panel.setOnTouchListener { _, event -> handleDrag(event); true }
+    panel.setOnTouchListener { _, event ->
+      withPanel(ownerPanel) { handleDrag(event) }
+      true
+    }
     return panel
   }
 
@@ -539,6 +1088,7 @@ class FloatingWidgetService : Service() {
     telegramTyping: Boolean,
     bridgeStatusText: String
   ): View {
+    val ownerPanel = activePanel
     val roundTrip = CopyBridgeAccessibilityService.getRoundTripUiState(this)
     val isBridgeBusy = gptBusy || telegramTyping
     val size = WidgetSize.COMPACT
@@ -558,14 +1108,14 @@ class FloatingWidgetService : Service() {
 
     appendDebugLog("WIDGET", "WIDGET_COMPACT_STYLE_STATE gptBusy=$gptBusy telegramTyping=$telegramTyping background=$compactBackgroundName")
 
-    val panel = LinearLayout(this).apply {
+    val panel = LinearLayout(widgetViewContext()).apply {
       orientation = LinearLayout.VERTICAL
       setPadding(size.panelPaddingHorizontal, size.panelPaddingTop, size.panelPaddingHorizontal, size.panelPaddingBottom)
       background = roundedBackground(compactBackgroundColor, 12f)
       elevation = 12f
     }
 
-    val header = LinearLayout(this).apply {
+    val header = LinearLayout(widgetViewContext()).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER
     }
@@ -595,11 +1145,13 @@ class FloatingWidgetService : Service() {
     updateApiBalanceBoxText()
 
     val gptButton = createWhiteButton("G", 22f) {
+      if (!acceptPanelAction("TG_TO_GPT")) return@createWhiteButton
       appendDebugLog("WIDGET", "tap SS G replyMode=$replyCopyModeString autoSend=$autoSendEnabled")
       runTelegramToGptSmart("ss")
     }
 
     val tgButton = createTelegramBlueButton(roundTripTelegramButtonLabel(roundTrip, compact = true), 22f) {
+      if (!acceptPanelAction("GPT_TO_TG")) return@createTelegramBlueButton
       appendDebugLog("WIDGET", "tap SS T gptMode=$gptOutputModeString autoSend=$autoSendEnabled autoExchange=$autoExchangeEnabled")
       if (autoExchangeEnabled && !autoSendEnabled && roundTrip.phase == CopyBridgeAccessibilityService.ROUND_TRIP_PHASE_IDLE) {
         Toast.makeText(
@@ -639,7 +1191,10 @@ class FloatingWidgetService : Service() {
     )
 
     panel.alpha = widgetOpacity
-    panel.setOnTouchListener { _, event -> handleDrag(event); true }
+    panel.setOnTouchListener { _, event ->
+      withPanel(ownerPanel) { handleDrag(event) }
+      true
+    }
     return panel
   }
 
@@ -664,7 +1219,11 @@ class FloatingWidgetService : Service() {
 
  
  fun handleHardwareKeyboardShortcutAction(action: String): Boolean {
-  if (isCollapsed) {
+  val allVisiblePanelsCollapsed =
+    listOf(phonePanel, dexPanel)
+      .filter { it.floatingView != null }
+      .all { it.isCollapsed }
+  if (allVisiblePanelsCollapsed) {
    appendDebugLog("SHORTCUT", "ignored hardware shortcut while collapsed action=$action")
    return false
   }
@@ -691,7 +1250,8 @@ class FloatingWidgetService : Service() {
  }
 
  private fun createCollapsedView(): View {
-    return TextView(this).apply {
+    val ownerPanel = activePanel
+    return TextView(widgetViewContext()).apply {
       alpha = clampWidgetOpacity(collapsedOpacity)
       text = "B"
       setTextColor(Color.WHITE)
@@ -703,9 +1263,11 @@ class FloatingWidgetService : Service() {
       elevation = 12f
 
       setOnTouchListener { view, event ->
-        val params = this@FloatingWidgetService.layoutParams ?: return@setOnTouchListener true
+        withPanel(ownerPanel) {
+         val params = this@FloatingWidgetService.layoutParams
+           ?: return@withPanel
 
-        when (event.action) {
+         when (event.action) {
           MotionEvent.ACTION_DOWN -> {
             view.alpha = collapsedPressedAlpha()
             initialX = params.x
@@ -757,8 +1319,10 @@ class FloatingWidgetService : Service() {
             true
           }
 
-          else -> true
+          else -> Unit
+         }
         }
+        true
       }
     }
   }
@@ -805,6 +1369,9 @@ class FloatingWidgetService : Service() {
  "BRIDGE_VISIBILITY_EDGE_CHANGE_ONCE previous=$previousVisible current=$bothVisible collapsed=$isCollapsed"
  )
 
+ listOf(phonePanel, dexPanel).forEach { panel ->
+  if (panel.floatingView == null) return@forEach
+  withPanel(panel) {
  if (bothVisible) {
  if (isCollapsed) {
  appendDebugLog(
@@ -815,7 +1382,7 @@ class FloatingWidgetService : Service() {
  saveWidgetPreferences()
  refreshWidgetAtSamePosition()
  }
- return
+ return@withPanel
  }
 
  if (!isCollapsed) {
@@ -827,19 +1394,36 @@ class FloatingWidgetService : Service() {
  saveWidgetPreferences()
  refreshWidgetAtSamePosition()
  }
+  }
+ }
  }
 
   private fun refreshWidgetAtSamePosition() {
-    val currentX = layoutParams?.x ?: 40
-    val currentY = layoutParams?.y ?: 320
+    val previousDisplayId = activeDisplayId
+
+    val currentX =
+      layoutParams?.x ?: getSavedWidgetX()
+
+    val currentY =
+      layoutParams?.y ?: getSavedWidgetY()
 
     removeFloatingWidget()
     showFloatingWidget()
 
-    layoutParams?.let { newParams ->
-      newParams.x = currentX
-      newParams.y = currentY
-      windowManager?.updateViewLayout(floatingView, newParams)
+    if (previousDisplayId != activeDisplayId) {
+      return
+    }
+
+    layoutParams?.let { params ->
+      params.x = currentX
+      params.y = currentY
+
+      floatingView?.let { view ->
+        windowManager?.updateViewLayout(
+          view,
+          params
+        )
+      }
     }
   }
 
@@ -869,7 +1453,7 @@ class FloatingWidgetService : Service() {
   private fun createApiBalanceBox(
     textSizeValue: Float
   ): TextView {
-    return TextView(this).apply {
+    return TextView(widgetViewContext()).apply {
       text = apiBalanceText
       setTextColor(getApiBalanceTextColor())
       textSize = textSizeValue
@@ -884,9 +1468,11 @@ class FloatingWidgetService : Service() {
   }
 
   private fun updateApiBalanceBoxText() {
-    apiBalanceTextView?.apply {
-      text = apiBalanceText
-      setTextColor(getApiBalanceTextColor())
+    listOf(phonePanel, dexPanel).forEach { panel ->
+      panel.apiBalanceTextView?.apply {
+        text = apiBalanceText
+        setTextColor(getApiBalanceTextColor())
+      }
     }
   }
 
@@ -907,16 +1493,73 @@ class FloatingWidgetService : Service() {
       timeInMillis = nowMillis
     }
 
-    val hour = calendar.get(java.util.Calendar.HOUR_OF_DAY)
-    val minuteOfDay = hour * 60 + calendar.get(java.util.Calendar.MINUTE)
+    val dayOfWeek = calendar.get(
+      java.util.Calendar.DAY_OF_WEEK
+    )
+
+    // DeepSeek: Saturday and Sunday are always off-peak.
+    // This also includes official weekend make-up workdays.
+    if (
+      dayOfWeek == java.util.Calendar.SATURDAY ||
+      dayOfWeek == java.util.Calendar.SUNDAY
+    ) {
+      return false
+    }
+
+    val year = calendar.get(java.util.Calendar.YEAR)
+    val month = calendar.get(java.util.Calendar.MONTH) + 1
+    val day = calendar.get(java.util.Calendar.DAY_OF_MONTH)
+
+    val dateKey = year * 10000 + month * 100 + day
+
+    // Official State Council public-holiday schedules.
+    // Update the table when a later year's official
+    // holiday schedule is published.
+    val isChinesePublicHoliday = when (year) {
+      2026 ->
+        dateKey in 20260101..20260103 ||
+        dateKey in 20260215..20260223 ||
+        dateKey in 20260404..20260406 ||
+        dateKey in 20260501..20260505 ||
+        dateKey in 20260619..20260621 ||
+        dateKey in 20260925..20260927 ||
+        dateKey in 20261001..20261007
+
+      2027 ->
+        dateKey in 20270101..20270103 ||
+        dateKey in 20270205..20270213 ||
+        dateKey in 20270403..20270405 ||
+        dateKey in 20270501..20270505 ||
+        dateKey in 20270609..20270609 ||
+        dateKey in 20270915..20270915 ||
+        dateKey in 20271001..20271007
+
+      else -> false
+    }
+
+    if (isChinesePublicHoliday) {
+      return false
+    }
+
+    val hour = calendar.get(
+      java.util.Calendar.HOUR_OF_DAY
+    )
+
+    val minuteOfDay =
+      hour * 60 + calendar.get(java.util.Calendar.MINUTE)
 
     val morningPeakStart = 9 * 60
     val morningPeakEnd = 12 * 60
     val afternoonPeakStart = 14 * 60
     val afternoonPeakEnd = 18 * 60
 
-    return (minuteOfDay >= morningPeakStart && minuteOfDay < morningPeakEnd) ||
-      (minuteOfDay >= afternoonPeakStart && minuteOfDay < afternoonPeakEnd)
+    return (
+      minuteOfDay >= morningPeakStart &&
+      minuteOfDay < morningPeakEnd
+    ) || (
+      minuteOfDay >= afternoonPeakStart &&
+      minuteOfDay < afternoonPeakEnd
+    )
   }
 
   private fun startDeepSeekBalanceAutoRefresh() {
@@ -1097,31 +1740,36 @@ class FloatingWidgetService : Service() {
   }
 
   private fun blinkApiBalanceBox() {
-    val box = apiBalanceBoxView ?: return
-    val normalBackground = roundedBackground(Color.parseColor("#242424"), 12f)
-    val warningBackground = roundedBackground(Color.parseColor("#B91C1C"), 12f)
-
-    var count = 0
-    val blinkRunnable = object : Runnable {
-      override fun run() {
-        if (apiBalanceBoxView == null) return
-
-        box.background = if (count % 2 == 0) warningBackground else normalBackground
-        count += 1
-
-        if (count < API_BALANCE_BLINK_COUNT) {
-          apiBalanceHandler.postDelayed(this, API_BALANCE_BLINK_INTERVAL_MS)
-        } else {
-          box.background = normalBackground
+    listOf(phonePanel, dexPanel).forEach { panel ->
+      val box = panel.apiBalanceBoxView ?: return@forEach
+      val normalBackground =
+        roundedBackground(Color.parseColor("#242424"), 12f)
+      val warningBackground =
+        roundedBackground(Color.parseColor("#B91C1C"), 12f)
+      var count = 0
+      val blinkRunnable = object : Runnable {
+        override fun run() {
+          if (panel.apiBalanceBoxView !== box) return
+          box.background =
+            if (count % 2 == 0) warningBackground else normalBackground
+          count += 1
+          if (count < API_BALANCE_BLINK_COUNT) {
+            apiBalanceHandler.postDelayed(
+              this,
+              API_BALANCE_BLINK_INTERVAL_MS
+            )
+          } else {
+            box.background = normalBackground
+          }
         }
       }
+      apiBalanceHandler.post(blinkRunnable)
     }
-
-    apiBalanceHandler.post(blinkRunnable)
   }
 
   private fun createHeaderButton(label: String, onClick: () -> Unit): TextView {
-    return TextView(this).apply {
+    val ownerPanel = activePanel
+    return TextView(widgetViewContext()).apply {
       text = label
       setTextColor(Color.WHITE)
       textSize = 13f
@@ -1134,7 +1782,7 @@ class FloatingWidgetService : Service() {
       applyPressStateAnimator(this)
       setOnClickListener { view ->
         view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-        onClick()
+        withPanel(ownerPanel) { onClick() }
       }
     }
   }
@@ -1227,7 +1875,7 @@ class FloatingWidgetService : Service() {
   private fun createBridgeStatusTextView(statusText: String): TextView {
     val isReady = statusText[0] == '\u2705'
 
-    return TextView(this).apply {
+    return TextView(widgetViewContext()).apply {
       text = statusText
       textSize = 11f
       gravity = android.view.Gravity.CENTER
@@ -1248,7 +1896,8 @@ class FloatingWidgetService : Service() {
     textSizeValue: Float,
     onClick: () -> Unit
   ): Button {
-    return Button(this).apply {
+    val ownerPanel = activePanel
+    return Button(widgetViewContext()).apply {
       text = label
       textSize = textSizeValue
       typeface = Typeface.DEFAULT_BOLD
@@ -1259,7 +1908,7 @@ class FloatingWidgetService : Service() {
       setPadding(8, 0, 8, 0)
       setOnClickListener { view ->
         view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-        onClick()
+        withPanel(ownerPanel) { onClick() }
       }
       minHeight = 0
       minimumHeight = 0
@@ -1273,7 +1922,8 @@ class FloatingWidgetService : Service() {
     textSizeValue: Float,
     onClick: () -> Unit
   ): Button {
-    return Button(this).apply {
+    val ownerPanel = activePanel
+    return Button(widgetViewContext()).apply {
       text = label
       textSize = textSizeValue
       typeface = Typeface.DEFAULT_BOLD
@@ -1284,7 +1934,7 @@ class FloatingWidgetService : Service() {
       setPadding(8, 0, 8, 0)
       setOnClickListener { view ->
         view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-        onClick()
+        withPanel(ownerPanel) { onClick() }
       }
       minHeight = 0
       minimumHeight = 0
@@ -1298,7 +1948,8 @@ class FloatingWidgetService : Service() {
     textSizeValue: Float,
     onClick: () -> Unit
   ): Button {
-    return Button(this).apply {
+    val ownerPanel = activePanel
+    return Button(widgetViewContext()).apply {
       text = label
       textSize = textSizeValue
       typeface = Typeface.DEFAULT_BOLD
@@ -1309,7 +1960,7 @@ class FloatingWidgetService : Service() {
       setPadding(8, 0, 8, 0)
       setOnClickListener { view ->
         view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-        onClick()
+        withPanel(ownerPanel) { onClick() }
       }
       minHeight = 0
       minimumHeight = 0
@@ -1396,8 +2047,19 @@ class FloatingWidgetService : Service() {
     private const val KEY_COLLAPSED_OPACITY = "collapsed_opacity"
     const val ACTION_RESTORE_WIDGET = "com.hwiject.copybridge.RESTORE_WIDGET"
     const val ACTION_REFRESH_WIDGET = "com.hwiject.copybridge.REFRESH_WIDGET"
+    const val ACTION_PANEL_MODE_CHANGED =
+      "com.hwiject.copybridge.PANEL_MODE_CHANGED"
     private const val KEY_WIDGET_X = "widget_x"
     private const val KEY_WIDGET_Y = "widget_y"
+    private const val KEY_WIDGET_DEX_X =
+      "widget_dex_x"
+    private const val KEY_WIDGET_DEX_Y =
+      "widget_dex_y"
+    private const val KEY_WIDGET_DEX_COLLAPSED =
+      "widget_dex_collapsed"
+    @Volatile
+    var isServiceRunning = false
+      private set
     private const val COLLAPSED_TAP_SLOP = 96f
     private const val COLLAPSED_DRAG_SLOP = 18f
     private const val OPACITY_MIN_VALUE = 0.10f

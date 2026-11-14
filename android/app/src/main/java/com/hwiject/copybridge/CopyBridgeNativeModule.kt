@@ -304,6 +304,121 @@ class CopyBridgeNativeModule(
   }
 
 
+  private val panelDisplayModes =
+    setOf("PHONE", "AUTO", "BOTH")
+
+  @ReactMethod
+  fun getPanelDisplayMode(promise: Promise) {
+    try {
+      val prefs = reactContext.getSharedPreferences(
+        "copybridge_floating_widget",
+        Context.MODE_PRIVATE
+      )
+
+      val saved = prefs.getString(
+        "panel_display_mode",
+        "PHONE"
+      ) ?: "PHONE"
+
+      promise.resolve(
+        if (saved in panelDisplayModes) saved else "PHONE"
+      )
+    } catch (error: Exception) {
+      promise.reject(
+        "GET_PANEL_DISPLAY_MODE_FAILED",
+        error
+      )
+    }
+  }
+
+  @ReactMethod
+  fun setPanelDisplayMode(
+    mode: String,
+    promise: Promise
+  ) {
+    if (mode !in panelDisplayModes) {
+      promise.reject(
+        "INVALID_PANEL_DISPLAY_MODE",
+        "Unsupported panel display mode"
+      )
+      return
+    }
+
+    try {
+      val prefs = reactContext.getSharedPreferences(
+        "copybridge_floating_widget",
+        Context.MODE_PRIVATE
+      )
+
+      prefs.edit()
+        .putString("panel_display_mode", mode)
+        .apply()
+
+      if (FloatingWidgetService.isServiceRunning) {
+        val intent = Intent(
+          reactContext,
+          FloatingWidgetService::class.java
+        ).apply {
+          action =
+            FloatingWidgetService.ACTION_PANEL_MODE_CHANGED
+        }
+
+        reactContext.startService(intent)
+      }
+
+      promise.resolve(mode)
+    } catch (error: Exception) {
+      promise.reject(
+        "SET_PANEL_DISPLAY_MODE_FAILED",
+        error
+      )
+    }
+  }
+
+  @ReactMethod
+  fun getDexPanelScale(promise: Promise) {
+    try {
+      val prefs = reactContext.getSharedPreferences(
+        "copybridge_floating_widget",
+        Context.MODE_PRIVATE
+      )
+      val saved = prefs.getInt("dex_panel_scale_percent", 50)
+      val valid = if (
+        saved in 50..100 && saved % 10 == 0
+      ) saved else 50
+      promise.resolve(valid)
+    } catch (error: Exception) {
+      promise.reject("GET_DEX_PANEL_SCALE_FAILED", error)
+    }
+  }
+
+  @ReactMethod
+  fun setDexPanelScale(percent: Int, promise: Promise) {
+    if (percent !in 50..100 || percent % 10 != 0) {
+      promise.reject(
+        "INVALID_DEX_PANEL_SCALE",
+        "Scale must be 50..100 in steps of 10"
+      )
+      return
+    }
+
+    try {
+      val prefs = reactContext.getSharedPreferences(
+        "copybridge_floating_widget",
+        Context.MODE_PRIVATE
+      )
+      prefs.edit()
+        .putInt("dex_panel_scale_percent", percent)
+        .apply()
+      if (FloatingWidgetService.isServiceRunning) {
+        refreshFloatingWidget()
+      }
+      promise.resolve(percent)
+    } catch (error: Exception) {
+      promise.reject("SET_DEX_PANEL_SCALE_FAILED", error)
+    }
+  }
+
   @ReactMethod
   fun getOpacitySettings(promise: Promise) {
     try {
